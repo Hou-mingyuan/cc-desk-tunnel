@@ -291,16 +291,6 @@ button.chip.danger:hover:not(:disabled) {
   font-size: 20px;
   white-space: nowrap;
 }
-.brand-connection {
-  margin-left: 8px;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 500;
-  vertical-align: middle;
-}
 .setting-name {
   width: 150px;
 }
@@ -402,6 +392,87 @@ button.chip.danger:hover:not(:disabled) {
   flex-direction: column;
   gap: 20px;
 }
+/* The service's address, with the services signed in to before to choose from. */
+.login-account {
+  position: relative;
+}
+.login-account input {
+  padding-right: 40px;
+}
+.login-account-toggle {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 32px;
+  height: 30px;
+  color: var(--muted);
+}
+.login-account-toggle[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+.login-accounts {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  max-height: 280px;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  list-style: none;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.14);
+}
+.login-accounts li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 6px;
+}
+.login-accounts li:hover {
+  background: var(--hover);
+}
+.login-account-choice {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 7px 8px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.login-account-name,
+.login-account-detail {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.login-account-detail {
+  color: var(--muted);
+  font-size: 12px;
+}
+.login-account-detail:empty {
+  display: none;
+}
+.login-accounts .icon-button {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  color: var(--muted);
+}
+.login-accounts .icon-button svg {
+  width: 14px;
+  height: 14px;
+}
 .login-options {
   display: flex;
   gap: 20px;
@@ -502,6 +573,13 @@ html[data-platform='darwin'] .titlebar {
 .connection-status small {
   color: var(--faint);
   font-size: 11px;
+}
+.connection-name {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+  font-weight: 500;
 }
 .connection-dot,
 .running-dot {
@@ -1615,6 +1693,22 @@ a.link-elsewhere {
 .link-card strong {
   font-weight: 600;
 }
+.leave-lead {
+  margin: 0 0 8px;
+  color: var(--text-2);
+}
+.leave-url {
+  margin: 0 0 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  background: var(--surface-2);
+  font-family: Consolas, 'Cascadia Code', monospace;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+  max-height: 160px;
+  overflow-y: auto;
+}
 /* A picture stands small in the conversation and opens whole in a dialog. */
 .picture {
   display: inline-block;
@@ -2411,7 +2505,7 @@ details[open] > summary > .fold-chevron {
   border-color: var(--accent);
   background: var(--accent-soft);
 }
-.composer textarea {
+.composer .message-input {
   display: block;
   width: 100%;
   border: 0;
@@ -2426,8 +2520,94 @@ details[open] > summary > .fold-chevron {
   border-radius: var(--radius-l) var(--radius-l) 0 0;
   color: var(--text);
 }
-.composer textarea:focus-visible {
+.composer .message-input:focus-visible {
   outline: none;
+}
+/* The desktop's box: rich text that stands for plain text, its files shown as files. */
+div.message-input {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: text;
+}
+div.message-input[data-empty]::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  color: var(--faint);
+  pointer-events: none;
+}
+div.message-input[aria-disabled] {
+  cursor: default;
+  color: var(--muted);
+}
+/* A file in a message: a small picture or a file's icon, and its name. */
+.path-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: min(100%, 260px);
+  height: 24px;
+  margin: 0 1px;
+  padding: 0 7px 0 3px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1;
+  vertical-align: -6px;
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: pointer;
+}
+a.path-chip:hover,
+.path-chip:hover {
+  border-color: var(--focus-line);
+  color: var(--text);
+}
+.path-chip img {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  object-fit: cover;
+}
+.path-chip.file {
+  padding-left: 6px;
+}
+.path-chip.file::before,
+.path-chip-remove {
+  content: '';
+  flex: none;
+  width: 14px;
+  height: 14px;
+  background: currentColor;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z'/%3E%3Cpath d='M14 2v4a2 2 0 0 0 2 2h4'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+}
+.path-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.5;
+}
+.path-chip-remove {
+  display: none;
+  width: 12px;
+  height: 12px;
+  margin-right: -2px;
+  color: var(--muted);
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M18 6 6 18M6 6l12 12'/%3E%3C/svg%3E");
+}
+.path-chip-remove:hover {
+  color: var(--text);
+}
+div.message-input:not([aria-disabled]) .path-chip:hover .path-chip-remove {
+  display: block;
+}
+.message-content .path-chip {
+  vertical-align: -5px;
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1;
 }
 .composer-toolbar {
   display: flex;
@@ -2674,8 +2854,46 @@ details[open] > summary > .fold-chevron {
   color: var(--text);
   font-weight: 600;
 }
+/* The list of models: a quiet heading, one even row a model with the chosen one ticked, and the refresh below a
+   line; the text of all of them starts at one edge. */
+.model-menu.choosing {
+  padding: 6px;
+}
+.model-menu.choosing .model-back,
+.model-refresh {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 30px;
+  margin: 0;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+.model-refresh {
+  margin-top: 4px;
+  border-top: 1px solid var(--line-soft);
+  border-radius: 0 0 8px 8px;
+}
+.model-menu.choosing .model-back:hover,
+.model-refresh:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+.model-refresh:disabled {
+  opacity: 0.6;
+}
+.model-menu.choosing .model-back svg,
+.model-refresh svg {
+  width: 13px;
+  height: 13px;
+}
 .model-options {
-  max-height: min(320px, 40dvh);
+  max-height: min(330px, 42dvh);
   overflow-y: auto;
 }
 .model-options button {
@@ -2684,32 +2902,32 @@ details[open] > summary > .fold-chevron {
   justify-content: space-between;
   gap: 8px;
   width: 100%;
-  text-align: left;
+  height: 30px;
+  padding: 0 10px;
   border: 0;
+  border-radius: 8px;
   background: transparent;
-  padding: 8px 10px;
-  border-radius: var(--radius-s);
+  color: var(--text);
   font-size: 13px;
+  text-align: left;
 }
-.model-options button:hover {
+.model-options button:hover:not(:disabled) {
   background: var(--hover);
 }
 .model-options button[aria-selected='true'] {
-  background: var(--surface-2);
+  font-weight: 600;
 }
 .model-options span {
   min-width: 0;
-  overflow-wrap: anywhere;
-}
-.model-options small {
-  display: block;
-  font-size: 11.5px;
-  color: var(--muted);
-  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .model-options svg {
-  width: 15px;
-  height: 15px;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
 }
 .slash-menu {
   bottom: calc(100% - 44px);
@@ -2972,7 +3190,7 @@ details[open] > summary > .fold-chevron {
   font-size: 12px;
   text-align: left;
 }
-.quota-period:hover {
+button.quota-period:hover {
   color: var(--accent);
 }
 .account-body.usage-body {
@@ -3625,6 +3843,18 @@ dialog::backdrop {
     width: 44px;
     height: 44px;
   }
+  /* Keep the same page action, aligned with the mobile titlebar's empty right slot. */
+  .page-settings .page-header:has(> .quota-page-refresh) {
+    display: contents;
+  }
+  .page-settings .quota-page-refresh {
+    position: fixed;
+    top: calc(8px + env(safe-area-inset-top));
+    right: 12px;
+    z-index: 3;
+    width: 44px;
+    height: 44px;
+  }
   .page-settings:not([data-settings-index]) > .sidebar,
   .page-settings[data-settings-index] > .workspace {
     display: none;
@@ -3645,6 +3875,9 @@ dialog::backdrop {
   .titlebar-menus,
   .connection-status small {
     display: none;
+  }
+  .connection-name {
+    max-width: 120px;
   }
   .titlebar h1 {
     text-align: left;
@@ -3699,6 +3932,9 @@ dialog::backdrop {
   .setting-row,
   .settings-list label {
     flex-wrap: wrap;
+  }
+  .quota-card > .setting-row {
+    flex-wrap: nowrap;
   }
   .account-heading {
     padding: 13px 14px;

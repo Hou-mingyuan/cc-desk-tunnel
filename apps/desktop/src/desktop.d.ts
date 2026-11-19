@@ -7,22 +7,25 @@ declare global {
       dev: boolean;
       platform: 'win32' | 'darwin' | 'linux';
       // Which of this computer's connections the window is ('' the first), and what they all share.
-      boot: { connection: string; shared: import('./shared.ts').Shared };
+      // `launcher`: a sign-in window, which is no connection's (see Launcher.tsx).
+      boot: { connection: string; launcher?: boolean; shared: import('./shared.ts').Shared };
       saveShared: (key: 'prefs' | 'projects', value: unknown) => Promise<void>;
       onSharedChanged: (
         callback: (key: keyof import('./shared.ts').Shared, value: unknown) => void,
       ) => () => void;
       // The sessions running in this window, for the other connections' windows to warn about.
       setBusy: (runs: import('./shared.ts').Run[]) => Promise<void>;
-      // Each connection is a window of its own; `open` tells whether it is running now.
-      connections: () => Promise<import('./shared.ts').ListedConnection[]>;
-      createConnection: (name: string) => Promise<import('./shared.ts').ListedConnection[]>;
-      openConnection: (id: string) => Promise<void>;
-      renameConnection: (
-        id: string,
-        name: string,
-      ) => Promise<import('./shared.ts').ListedConnection[]>;
-      removeConnection: (id: string) => Promise<import('./shared.ts').ListedConnection[]>;
+      // Each connection is a window of its own, signed in to one service; the ones that have signed in somewhere,
+      // the latest first.
+      accounts: () => Promise<import('./shared.ts').Account[]>;
+      // Shows the connection's window, or signs in to it in a process of its own, with its remembered token.
+      openAccount: (id: string) => Promise<void>;
+      // An empty name has the connection go by its service's address.
+      renameAccount: (id: string, name: string) => Promise<import('./shared.ts').Account[]>;
+      // Forgets the sign-in, and with it what the connection kept on this computer.
+      forgetAccount: (id: string) => Promise<import('./shared.ts').Account[]>;
+      // A sign-in page in a window of its own, as starting the program again opens.
+      newLoginWindow: () => Promise<void>;
       chooseProject: () => Promise<string | null>;
       asOnDisk: (path: string) => Promise<string>;
       // Whether each folder is on this computer, in the order given.
@@ -63,8 +66,31 @@ declare global {
       chooseWorkspace: (reset: boolean) => Promise<string[]>;
       createWorkspace: () => Promise<string>;
       removeWorkspace: (directory: string) => Promise<void>;
+      // The connection's window: the sign-in its sign-in window handed over, to connect with at once.
       loadLogin: () => Promise<import('./LoginPage.tsx').ConnectionForm | null>;
+      // Kept once signed in, and as the choices to remember the token and sign in by itself change.
       saveLogin: (login: import('./LoginPage.tsx').ConnectionForm) => Promise<void>;
+      // The connection's window: its connection ended for good, by the user or with `error`. A sign-in window
+      // for its service takes its place.
+      signOut: (error?: string | null) => Promise<void>;
+      // How the connection's window is getting on until it has connected (see Launcher.tsx).
+      reportSignIn: (report: import('./Launcher.tsx').SignInReport) => Promise<void>;
+      // A sign-in window: what to offer (see `launcher:load` in electron/main.cjs). `error` ended the sign-in it
+      // takes over from; `signIn` signs in at once.
+      loadLauncher: () => Promise<{
+        form?: import('./LoginPage.tsx').ConnectionForm;
+        error?: string;
+        signIn?: boolean;
+      }>;
+      // Signs in to the service: its connection's window connects in the background, reported through
+      // `onSignIn`, and is shown once connected. `shown`: the service's window was open already and is shown.
+      startSignIn: (
+        login: import('./LoginPage.tsx').ConnectionForm,
+      ) => Promise<{ shown?: string; error?: string }>;
+      cancelSignIn: () => Promise<void>;
+      // The sign-in window made wide enough for the settings, or back to the size of its form.
+      widenLauncher: (wide: boolean) => Promise<void>;
+      onSignIn: (callback: (report: import('./Launcher.tsx').SignInReport) => void) => () => void;
       loadDrafts: () => Promise<Record<string, string>>;
       saveDrafts: (drafts: Record<string, string>) => Promise<void>;
       loadSchedules: (initial: string) => Promise<{ path: string; text: string }>;
@@ -85,8 +111,7 @@ declare global {
       onNotifyClicked: (callback: (sessionId: string | null) => void) => () => void;
       // 1 and -1 step the interface size, 0 restores it.
       zoom: (direction: number) => void;
-      // `all` also closes the windows of the other connections.
-      quit: (all?: boolean) => Promise<void>;
+      quit: () => Promise<void>;
       version: () => Promise<string>;
       // The notes of a released version, read from its page on GitHub.
       releaseNotes: (version: string) => Promise<string>;

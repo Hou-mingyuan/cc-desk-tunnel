@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { Config, directories } from '../src/config.mjs';
+import { Config, directories, sameService, serviceKey } from '../src/config.mjs';
 import { proxyFor } from '../src/connection.mjs';
 import { RESTORE, relay } from '../src/terminal.mjs';
 import { readKeys } from '../src/keys.mjs';
@@ -171,7 +171,7 @@ test('a lost connection, a terminal taken elsewhere and output left behind end t
   assert.deepEqual(await three, { how: 'stalled' });
 });
 
-test('ccdt login offers the services the desktop client signs in to, by its names, without their tokens', (t) => {
+test('ccdt login offers the services the desktop client signs in to, by their names or addresses, without their tokens', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'ccdt-logins-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const paths = { cli: join(root, 'cli'), desktop: join(root, 'desktop') };
@@ -184,14 +184,30 @@ test('ccdt login offers the services the desktop client signs in to, by its name
     join(paths.desktop, 'connections', 'abcdefgh', 'settings.json'),
     login('wss://other/ws', ''),
   );
+  // The same service written another way, and one not signed in to yet, are not offered again.
+  for (const [id, settings] of [
+    ['ijklmnop', { login: { url: 'wss://OTHER:443/ws', fingerprint: '' } }],
+    ['qrstuvwx', { login: { url: 'wss://typo/ws', fingerprint: '' }, pending: 1 }],
+  ]) {
+    mkdirSync(join(paths.desktop, 'connections', id), { recursive: true });
+    writeFileSync(
+      join(paths.desktop, 'connections', id, 'settings.json'),
+      JSON.stringify(settings),
+    );
+  }
   writeFileSync(
     join(paths.desktop, 'shared', 'connections.json'),
     JSON.stringify([{ id: 'abcdefgh', name: '家里' }]),
   );
-  assert.deepEqual(new Config(paths).desktopLogins(), [
-    { url: 'wss://main/ws', fingerprint: 'AA:BB', name: '主连接' },
+  const config = new Config(paths);
+  assert.deepEqual(config.desktopLogins(), [
+    { url: 'wss://main/ws', fingerprint: 'AA:BB', name: 'main/ws' },
     { url: 'wss://other/ws', fingerprint: '', name: '家里' },
   ]);
+  // Its names are found by the service, however the address is written.
+  assert.equal(config.names().get(serviceKey('wss://Other:443/ws')), '家里');
+  assert.ok(sameService('wss://Other:443/ws', 'wss://other/ws'));
+  assert.ok(!sameService('wss://other/a/ws', 'wss://other/b/ws'));
 });
 
 // Three services signed in to, the desktop client calling one of them 公司.
@@ -281,6 +297,29 @@ test('upgrading with no service saved says to log in, rather than failing inside
     assert.equal(result.status, 1);
     assert.match(result.stderr + result.stdout, /还没有登录服务端/);
     assert.doesNotMatch(result.stderr + result.stdout, /before initialization/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a token handed over by the desktop client is saved without connecting to check it', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ccdt-handover-'));
+  try {
+    const ccdt = (args, input = '') =>
+      spawnSync(process.execPath, ['apps/cli/bin/ccdt.mjs', ...args], {
+        encoding: 'utf8',
+        input,
+        env: { ...process.env, CCDT_CONFIG_DIR: join(root, 'cli'), APPDATA: join(root, 'appdata') },
+      });
+    // An address that resolves nowhere: connecting to it could only fail.
+    const login = ccdt(
+      ['login', 'wss://nowhere.invalid/ws', '--token-stdin', '--no-verify', '--no-save'],
+      's'.repeat(32),
+    );
+    assert.equal(login.status, 0, login.stderr);
+    assert.match(login.stderr, /已登录 wss:\/\/nowhere\.invalid\/ws/);
+    assert.doesNotMatch(login.stderr, /正在验证/);
+    assert.match(ccdt(['server']).stderr, /nowhere\.invalid/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

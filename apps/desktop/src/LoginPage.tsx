@@ -1,24 +1,33 @@
-import { Download, Settings, SquareTerminal, Unplug } from 'lucide-react';
-import { useState } from 'react';
+import { ChevronDown, Download, Settings, SquareTerminal, Unplug, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { FORCED_UPGRADE_SINCE } from '@cc-desk-tunnel/protocol';
 import { thisDevice } from './device.ts';
 import { GithubMark, openProject, project } from './project.tsx';
-import { useConnectionName } from './shared.ts';
+import { serviceKey } from './shared.ts';
+import type { Account } from './shared.ts';
+
+// What the token field shows for a token its connection keeps, which this window never reads.
+const keptToken = '\u2022'.repeat(10);
 
 export type ConnectionForm = {
   url: string;
   token: string;
   fingerprint: string;
   mode: 'local' | 'remote';
-  // Desktop only: keep the token (encrypted for this Windows account) and connect on the next launch.
+  // Desktop only: keep the token (encrypted for this Windows account), and sign in when the program is started
+  // with no window open, which only one service does.
   remember: boolean;
   autoLogin: boolean;
+  // An earlier version's connection that kept no address, to take the one given now.
+  id?: string;
 };
 
+// The sign-in window's form (see Launcher.tsx).
 export default function LoginPage({
   form,
   change,
   connecting,
+  cancel,
   error,
   upgrade,
   direct,
@@ -33,6 +42,8 @@ export default function LoginPage({
   form: ConnectionForm;
   change: (values: Partial<ConnectionForm>) => void;
   connecting: boolean;
+  // Gives up the sign-in under way.
+  cancel?: () => void;
   error: string | null;
   // The version of the installer a service of another version offers this client.
   upgrade: string | null;
@@ -50,9 +61,66 @@ export default function LoginPage({
   showNotes: (version: string) => void;
   submit: () => void;
   // This computer's own settings, which need no connection.
-  openSettings: () => void;
+  openSettings?: () => void;
 }) {
-  const connectionName = useConnectionName();
+  // The services this computer has signed in to, each a window of its own (see electron/connections.cjs): one
+  // fills the form, and its record can be forgotten. A remembered token is not read here: the sign-in takes it.
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [listOpen, setListOpen] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
+  const picker = useRef<HTMLDivElement>(null);
+  const readAccounts = () => {
+    void window.desktop?.accounts().then(setAccounts);
+  };
+  useEffect(readAccounts, []);
+  useEffect(() => {
+    if (!listOpen) return;
+    const away = (event: PointerEvent) => {
+      if (!picker.current?.contains(event.target as Node)) setListOpen(false);
+    };
+    document.addEventListener('pointerdown', away);
+    return () => document.removeEventListener('pointerdown', away);
+  }, [listOpen]);
+  const failed = (failure: unknown) =>
+    setListError(
+      String((failure as Error)?.message ?? failure).replace(/^.*?'accounts:\w+': (Error: )?/, ''),
+    );
+  // A service whose token its connection keeps shows the field filled. Typing there replaces it; emptied, the
+  // field asks for one again.
+  const [replaced, setReplaced] = useState<string | null>(null);
+  const remembered =
+    !form.token &&
+    replaced !== serviceKey(form.url) &&
+    !!accounts.find((account) => account.url && serviceKey(account.url) === serviceKey(form.url))
+      ?.saved;
+  function choose(account: Account) {
+    setListOpen(false);
+    setListError(null);
+    setReplaced(null);
+    change({
+      // An earlier version's connection that kept no address takes the one typed in.
+      ...(account.url ? { id: undefined } : { id: account.id }),
+      url: account.url,
+      fingerprint: account.fingerprint,
+      mode: account.mode,
+      token: '',
+      remember: account.saved,
+      autoLogin: account.autoLogin,
+    });
+  }
+  function forget(account: Account) {
+    if (
+      !window.confirm(
+        `删除“${account.label || '未保存地址的连接'}”的登录记录？这台电脑上为它保存的凭据、草稿和定时任务会一并删除；服务端上的会话不受影响。`,
+      )
+    )
+      return;
+    window.desktop!.forgetAccount(account.id).then((next) => {
+      setListError(null);
+      setAccounts(next);
+      if (!next.length) setListOpen(false);
+    }, failed);
+  }
   const [serviceUpgrade, setServiceUpgrade] = useState<{
     phase: 'running' | 'done' | 'failed';
     text: string;
@@ -101,7 +169,8 @@ export default function LoginPage({
       .finally(stop);
   }
   const shownError =
-    serviceUpgrade && serviceUpgrade.phase !== 'running' ? serviceUpgrade.text : error;
+    listError ??
+    (serviceUpgrade && serviceUpgrade.phase !== 'running' ? serviceUpgrade.text : error);
   return (
     <main className="login-page">
       <div className="window-drag" />
@@ -109,7 +178,6 @@ export default function LoginPage({
         <div className="brand">
           <SquareTerminal />
           <span>CC Desk Tunnel</span>
-          {connectionName && <span className="brand-connection">{connectionName}</span>}
         </div>
         <div className="login-title">
           <h1>连接代理服务</h1>
@@ -141,17 +209,71 @@ export default function LoginPage({
               </button>
             </div>
           )}
-          <label>
-            服务地址
-            <input
-              autoFocus
-              type="url"
-              value={form.url}
-              onChange={(event) => change({ url: event.target.value })}
-              required
-              spellCheck={false}
-            />
-          </label>
+          <div
+            className="login-account"
+            ref={picker}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape' && listOpen) {
+                event.stopPropagation();
+                setListOpen(false);
+              }
+            }}
+          >
+            <label>
+              服务地址
+              <input
+                autoFocus
+                type="url"
+                value={form.url}
+                onChange={(event) => change({ url: event.target.value })}
+                required
+                spellCheck={false}
+              />
+            </label>
+            {accounts.length > 0 && (
+              <button
+                type="button"
+                className="icon-button login-account-toggle"
+                aria-label="登录过的服务"
+                aria-expanded={listOpen}
+                onClick={() => {
+                  if (!listOpen) readAccounts();
+                  setListOpen(!listOpen);
+                }}
+              >
+                <ChevronDown />
+              </button>
+            )}
+            {listOpen && accounts.length > 0 && (
+              <ul className="login-accounts" aria-label="登录过的服务">
+                {accounts.map((account) => (
+                  <li key={account.id}>
+                    <button
+                      type="button"
+                      className="login-account-choice"
+                      onClick={() => choose(account)}
+                    >
+                      <span className="login-account-name">
+                        {account.label || '未保存地址的连接'}
+                      </span>
+                      {account.name && account.url && (
+                        <span className="login-account-detail">{account.url}</span>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label={`删除 ${account.label || '未保存地址的连接'} 的登录记录`}
+                      title="删除登录记录"
+                      onClick={() => forget(account)}
+                    >
+                      <X />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
           {form.mode === 'remote' && (
             <label>
               服务证书指纹（可选）
@@ -168,8 +290,12 @@ export default function LoginPage({
             服务凭据
             <input
               type="password"
-              value={form.token}
-              onChange={(event) => change({ token: event.target.value })}
+              value={remembered ? keptToken : form.token}
+              onChange={(event) => {
+                if (!remembered) return change({ token: event.target.value });
+                setReplaced(serviceKey(form.url));
+                change({ token: event.target.value.replaceAll('\u2022', '') });
+              }}
               required
               autoComplete="off"
             />
@@ -266,12 +392,19 @@ export default function LoginPage({
             <Unplug />
             {connecting ? '连接中…' : '连接'}
           </button>
+          {connecting && cancel && (
+            <button className="button login-submit" type="button" onClick={cancel}>
+              取消
+            </button>
+          )}
         </form>
         <div className="login-links">
-          <button className="project-link" type="button" onClick={openSettings}>
-            <Settings />
-            本机设置
-          </button>
+          {openSettings && (
+            <button className="project-link" type="button" onClick={openSettings}>
+              <Settings />
+              本机设置
+            </button>
+          )}
           {project.url && (
             <button className="project-link" type="button" onClick={openProject}>
               <GithubMark />

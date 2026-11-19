@@ -16,11 +16,13 @@ import {
   Search,
   Settings,
   SlidersHorizontal,
+  Smartphone,
   SquareTerminal,
   UserRound,
 } from 'lucide-react';
 import type { ConnectedDevice, ProxyClient } from './client.ts';
 import WebAccessSettings from './WebAccessSettings.tsx';
+import InstallAppSettings from './InstallAppSettings.tsx';
 import Help from './Help.tsx';
 import type { ConnectionForm } from './LoginPage.tsx';
 import { connectionWaits, setPrefs, themes, usePrefs, waitRange } from './prefs.ts';
@@ -34,7 +36,7 @@ import GlobalInstructions from './GlobalInstructions.tsx';
 import IdleCompactionSettings from './IdleCompactionSettings.tsx';
 import SettingsPanel from './SettingsPanel.tsx';
 import { useShared } from './shared.ts';
-import type { ListedConnection } from './shared.ts';
+import type { Account } from './shared.ts';
 import ShellSettings from './ShellSettings.tsx';
 import ShortcutSettings from './ShortcutSettings.tsx';
 import { IconButton, Page, Row, Switch } from './ui.tsx';
@@ -52,6 +54,7 @@ export type Section =
   | 'account'
   | 'claude'
   | 'instructions'
+  | 'install'
   | 'help'
   | 'about';
 // The groups say where their settings are kept and what they apply to: this computer, the service (for every device
@@ -69,7 +72,7 @@ export const sections: {
     name: '常规',
     group: '本机',
     icon: Settings,
-    words: '窗口 托盘 后台 启动 普通会话 文件夹 审批 绕过权限',
+    words: '窗口 托盘 后台 启动 普通会话 文件夹 对话记录 缓存 占用 清理 审批 绕过权限',
   },
   {
     id: 'appearance',
@@ -83,7 +86,7 @@ export const sections: {
     name: '连接',
     group: '本机',
     icon: Cable,
-    words: '记住凭据 自动登录 多开 多个连接 窗口 服务端 等待 超时 SSH 执行通道',
+    words: '记住凭据 自动登录 多开 多个连接 登录过的服务 备注名 窗口 服务端 等待 超时 SSH 执行通道',
   },
   {
     id: 'notifications',
@@ -140,6 +143,13 @@ export const sections: {
     group: 'Claude Code',
     icon: FileText,
     words: 'CLAUDE.md AGENTS.md 提示词 说明',
+  },
+  {
+    id: 'install',
+    name: '手机应用',
+    group: '其他',
+    icon: Smartphone,
+    words: '添加至手机 安装 名称 图标 角标',
   },
   { id: 'help', name: '帮助', group: '其他', icon: CircleHelp, words: '说明 常见问题' },
   {
@@ -384,19 +394,18 @@ function Seconds({
 
 // The computer's connections, each a window of its own to a service of its own: see electron/connections.cjs.
 function Connections() {
-  const [list, setList] = useState<ListedConnection[]>([]);
-  const [name, setName] = useState('');
+  const [list, setList] = useState<Account[]>([]);
   const [editing, setEditing] = useState<{ id: string; name: string } | null>(null);
   const [error, setError] = useState('');
   const names = useShared('connections');
   // Whether a window is open is its process's to tell, so it is asked again while the page is shown.
   useEffect(() => {
-    const read = () => void window.desktop!.connections().then(setList);
+    const read = () => void window.desktop!.accounts().then(setList);
     read();
     const timer = setInterval(read, 2000);
     return () => clearInterval(timer);
   }, [names]);
-  const act = (work: Promise<ListedConnection[] | void>) =>
+  const act = (work: Promise<Account[] | void>) =>
     work.then(
       (next) => {
         setError('');
@@ -405,110 +414,94 @@ function Connections() {
       },
       (failure) => {
         setError(
-          String(failure?.message ?? failure).replace(/^.*?'connections:\w+': (Error: )?/, ''),
+          String(failure?.message ?? failure).replace(/^.*?'(accounts|login):\w+': (Error: )?/, ''),
         );
         return false;
       },
     );
   return (
     <>
-      <h2 className="page-heading">多个连接</h2>
+      <h2 className="page-heading">登录过的服务</h2>
       <div className="card">
-        {list.map((entry) => (
-          <Row
-            key={entry.id}
-            title={entry.name}
-            detail={entry.current ? '当前窗口' : entry.open ? '已打开' : '未打开'}
-          >
-            {editing?.id === entry.id ? (
-              <form
-                className="setting-actions"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void act(window.desktop!.renameConnection(entry.id, editing.name)).then(
-                    (done) => done && setEditing(null),
-                  );
-                }}
-              >
-                <input
-                  className="setting-name"
-                  aria-label="连接的名称"
-                  maxLength={24}
-                  autoFocus
-                  value={editing.name}
-                  onChange={(event) => setEditing({ id: entry.id, name: event.target.value })}
-                />
-                <button type="submit" className="button" disabled={!editing.name.trim()}>
-                  保存
-                </button>
-                <button type="button" className="button" onClick={() => setEditing(null)}>
-                  取消
-                </button>
-              </form>
-            ) : (
-              <span className="setting-actions">
-                {!entry.current && (
+        {list
+          .map((item) => ({ ...item, label: item.label || '未保存地址的连接' }))
+          .map((entry) => (
+            <Row key={entry.id} title={entry.label} detail={entry.name ? entry.url : undefined}>
+              {editing?.id === entry.id ? (
+                <form
+                  className="setting-actions"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void act(window.desktop!.renameAccount(entry.id, editing.name)).then(
+                      (done) => done && setEditing(null),
+                    );
+                  }}
+                >
+                  <input
+                    className="setting-name"
+                    aria-label="备注名"
+                    placeholder="不填则显示服务地址"
+                    maxLength={24}
+                    autoFocus
+                    value={editing.name}
+                    onChange={(event) => setEditing({ id: entry.id, name: event.target.value })}
+                  />
+                  <button type="submit" className="button">
+                    保存
+                  </button>
+                  <button type="button" className="button" onClick={() => setEditing(null)}>
+                    取消
+                  </button>
+                </form>
+              ) : (
+                <span className="setting-actions">
+                  {!entry.current && (
+                    <button
+                      type="button"
+                      className="button"
+                      aria-label={`打开 ${entry.label}`}
+                      onClick={() => void act(window.desktop!.openAccount(entry.id))}
+                    >
+                      {entry.open ? '切换到' : '打开'}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="button"
-                    aria-label={`打开 ${entry.name}`}
-                    onClick={() => void act(window.desktop!.openConnection(entry.id))}
+                    aria-label={`备注名 ${entry.label}`}
+                    onClick={() => setEditing({ id: entry.id, name: entry.name })}
                   >
-                    {entry.open ? '切换到' : '打开'}
+                    备注名
                   </button>
-                )}
-                <button
-                  type="button"
-                  className="button"
-                  aria-label={`改名 ${entry.name}`}
-                  onClick={() => setEditing({ id: entry.id, name: entry.name })}
-                >
-                  改名
-                </button>
-                {entry.id && !entry.current && (
-                  <button
-                    type="button"
-                    className="button danger"
-                    aria-label={`删除 ${entry.name}`}
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          `删除连接“${entry.name}”？它在这台电脑上保存的服务地址、凭据、草稿和定时任务会一并删除；服务端上的会话不受影响。`,
+                  {!entry.current && (
+                    <button
+                      type="button"
+                      className="button danger"
+                      aria-label={`删除 ${entry.label}`}
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `删除“${entry.label}”的登录记录？这台电脑上为它保存的凭据、草稿和定时任务会一并删除；服务端上的会话不受影响。`,
+                          )
                         )
-                      )
-                        void act(window.desktop!.removeConnection(entry.id));
-                    }}
-                  >
-                    删除
-                  </button>
-                )}
-              </span>
-            )}
-          </Row>
-        ))}
-        <Row
-          title="新建连接"
-          detail="再开一个窗口去连另一台服务端。每个连接各有自己的服务地址、凭据、草稿和定时任务；项目列表、通知、快捷键等本机设置是共用的"
-        >
-          <form
-            className="setting-actions"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void act(window.desktop!.createConnection(name)).then((done) => done && setName(''));
-            }}
+                          void act(window.desktop!.forgetAccount(entry.id));
+                      }}
+                    >
+                      删除
+                    </button>
+                  )}
+                </span>
+              )}
+            </Row>
+          ))}
+        <Row title="新的登录窗口">
+          <button
+            type="button"
+            className="button"
+            onClick={() => void act(window.desktop!.newLoginWindow())}
           >
-            <input
-              className="setting-name"
-              aria-label="新连接的名称"
-              placeholder="例如：工作"
-              maxLength={24}
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-            <button type="submit" className="button" disabled={!name.trim()}>
-              新建并打开
-            </button>
-          </form>
+            打开
+          </button>
         </Row>
       </div>
       {error && (
@@ -520,11 +513,54 @@ function Connections() {
   );
 }
 
+// The history read before and kept here; clearing it has every session read from the service again. Each
+// connection keeps its own: a sign-in window, no connection's, has none to show.
+function HistoryCacheCard({ client }: { client: ProxyClient }) {
+  const [stats, setStats] = useState<Awaited<ReturnType<ProxyClient['disk']['stats']>>>(null);
+  const read = () => void client.disk.stats().then(setStats);
+  useEffect(read, [client]);
+  if (!stats || window.desktop?.boot?.launcher) return null;
+  const size = !stats.bytes
+    ? ''
+    : stats.bytes < 1024 * 1024
+      ? `约 ${Math.ceil(stats.bytes / 1024)} KB · `
+      : stats.bytes < 1024 * 1024 * 1024
+        ? `约 ${(stats.bytes / 1024 / 1024).toFixed(1)} MB · `
+        : `约 ${(stats.bytes / 1024 / 1024 / 1024).toFixed(2)} GB · `;
+  return (
+    <>
+      <h2 className="page-heading">对话记录</h2>
+      <div className="card">
+        <Row title="本机缓存" detail="读过的对话留在本机，再次打开只补新内容">
+          <span className="setting-actions">
+            <span className="setting-value">
+              {size}
+              {stats.sessions} 个会话
+            </span>
+            <button
+              type="button"
+              className="button"
+              onClick={() => {
+                client.resync();
+                read();
+              }}
+            >
+              清理
+            </button>
+          </span>
+        </Row>
+      </div>
+    </>
+  );
+}
+
 function General({
+  client,
   browser,
   workspaceRoot,
   chooseWorkspace,
 }: {
+  client: ProxyClient;
   browser: boolean;
   workspaceRoot: string;
   chooseWorkspace: (reset: boolean) => void;
@@ -578,6 +614,7 @@ function General({
           </div>
         </>
       )}
+      <HistoryCacheCard client={client} />
       <h2 className="page-heading">审批</h2>
       <div className="card">
         <Row
@@ -643,7 +680,7 @@ function ConnectionSettings({
             onChange={(remember) => changeForm({ remember, autoLogin: remember && form.autoLogin })}
           />
         </Row>
-        <Row title="自动登录" detail="启动客户端后直接连接上次的服务">
+        <Row title="自动登录" detail="打开程序时直接登录这个服务">
           <Switch
             label="自动登录"
             checked={form.autoLogin}
@@ -892,16 +929,25 @@ export default function SettingsPage({
   const term = search.trim().toLowerCase();
   // Before a connection only this computer's; in a browser no computer's own nor Claude Code's files; the service's
   // where there is one to keep them. A page with nothing to set where it is shown is not listed.
-  const shown = sections.filter(
-    (item) =>
-      (!back || item.group === '本机') &&
-      (item.id !== 'connection' || window.desktop) &&
-      (!browser || !['context', 'account', 'claude', 'instructions'].includes(item.id)) &&
-      (item.id !== 'context' || native) &&
-      (item.id !== 'shell' || (native && !browser && !!here && platformOf(here) === 'win32')) &&
-      (item.id !== 'web' || native || browser) &&
-      `${item.name} ${item.words}`.toLowerCase().includes(term),
-  );
+  const shown = sections
+    .map((item) =>
+      browser && item.id === 'account'
+        ? { ...item, name: '订阅用量', words: '订阅 用量 额度 周期统计 重置 自动读取额度' }
+        : item,
+    )
+    .filter(
+      (item) =>
+        (!back || item.group === '本机') &&
+        (item.id !== 'connection' || window.desktop) &&
+        (item.id !== 'install' ||
+          (browser && /Android.*Mobile|iPhone|iPod/i.test(navigator.userAgent))) &&
+        (!browser || !['context', 'claude', 'instructions'].includes(item.id)) &&
+        (item.id !== 'account' || native || !browser) &&
+        (item.id !== 'context' || native) &&
+        (item.id !== 'shell' || (native && !browser && !!here && platformOf(here) === 'win32')) &&
+        (item.id !== 'web' || native || browser) &&
+        `${item.name} ${item.words}`.toLowerCase().includes(term),
+    );
   return (
     <>
       <aside className="sidebar">
@@ -982,8 +1028,11 @@ export default function SettingsPage({
           <Page title="浏览器访问" intro={everyDevice}>
             <WebAccessSettings client={client} browser={browser} connectionUrl={form.url} />
           </Page>
+        ) : section === 'install' && browser ? (
+          <InstallAppSettings />
         ) : section === 'general' ? (
           <General
+            client={client}
             browser={browser}
             workspaceRoot={workspaceRoot}
             chooseWorkspace={chooseWorkspace}

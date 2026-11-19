@@ -4,7 +4,7 @@ import { basename, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { FORCED_UPGRADE_SINCE } from '@cc-desk-tunnel/protocol';
 import { upgradeService } from '../../desktop/electron/service-upgrade.mjs';
-import { Config, hostOf } from './config.mjs';
+import { Config, hostOf, sameService, serviceKey } from './config.mjs';
 import { Service, proxyFor } from './connection.mjs';
 import { readKeys } from './keys.mjs';
 import { pad, pick } from './picker.mjs';
@@ -27,7 +27,8 @@ const HELP = `ccdt：在自己的终端里使用 CC Desk Tunnel 服务端上的�
   ccdt config 名称 [值]  查看或修改一项，供脚本使用；值写 default 恢复默认
   ccdt server            已登录的服务端：选一个作为默认连接的，或登录新的
   ccdt login [wss 地址]  登录服务端；不写地址时从图形客户端保存的里选。--fingerprint 证书指纹，
-                         --token-stdin 从标准输入读凭据，--no-save 不保存
+                         --token-stdin 从标准输入读凭据，--no-save 不保存，
+                         --no-verify 不连接验证、只保存（图形客户端交给 ccdt 已在用的凭据时用）
   ccdt logout            退出一个服务端（登录了几个时先选），其他的不受影响
   ccdt open <会话 ID>    按 ID 打开（ID 可只写开头几位），供脚本使用
   ccdt upgrade [--yes]   升级服务端（升级前会问；--yes 不问），再把 ccdt 换成与服务端相同的版本；
@@ -128,7 +129,7 @@ async function readLine(prompt, text = '') {
 }
 
 // What a service is called here: the desktop client's name for the connection to it, else its host.
-const called = (server, names) => names.get(server.url) ?? hostOf(server.url);
+const called = (server, names) => names.get(serviceKey(server.url)) ?? hostOf(server.url);
 // The services signed in to, the one connected to last first, each line its name, when it was last used and its
 // address; the one used when none is named is marked.
 function serverLines(config, names) {
@@ -137,7 +138,7 @@ function serverLines(config, names) {
     servers,
     lines: servers.map(
       (server) =>
-        `${pad(called(server, names), 18)}${pad(server.usedAt ? when(server.usedAt) : '', 14)}${dim(server.url)}${server.url === config.server()?.url ? '  （当前）' : ''}`,
+        `${pad(called(server, names), 18)}${pad(server.usedAt ? when(server.usedAt) : '', 14)}${dim(server.url)}${sameService(server.url, config.server()?.url) ? '  （当前）' : ''}`,
     ),
   };
 }
@@ -247,7 +248,7 @@ async function login(config, values, url) {
         [
           ...saved.map(
             (login) =>
-              `${pad(login.name, 18)}${dim(login.url)}${config.servers.some((server) => server.url === login.url) ? '  （已登录）' : ''}`,
+              `${pad(login.name, 18)}${dim(login.url)}${config.servers.some((server) => sameService(server.url, login.url)) ? '  （已登录）' : ''}`,
           ),
           '输入其他地址…',
         ],
@@ -275,15 +276,20 @@ async function login(config, values, url) {
     ? await readSecret('')
     : process.env.CCDT_TOKEN ||
       (await readSecret('服务凭据（与图形客户端填的相同，输入时不显示）：'));
-  say(dim('正在验证……'));
-  const service = await Service.connect({
-    ...server,
-    token,
-    deviceId: config.device(),
-    waits: config.waits,
-  });
-  say(`已登录 ${server.url}（服务端版本 ${service.version}）。`);
-  await service.close();
+  // A token the desktop client is connected with right now has been checked: connecting again only to check it
+  // would hold up the terminal it is handed over for (see the desktop's ccdt.mjs).
+  if (values['no-verify']) say(`已登录 ${server.url}。`);
+  else {
+    say(dim('正在验证……'));
+    const service = await Service.connect({
+      ...server,
+      token,
+      deviceId: config.device(),
+      waits: config.waits,
+    });
+    say(`已登录 ${server.url}（服务端版本 ${service.version}）。`);
+    await service.close();
+  }
   const previous = config.server(server.url);
   if (previous) discard(previous.url, previous.token);
   const kept = values['no-save'] ? undefined : protect(server.url, token);
@@ -649,6 +655,7 @@ export async function main(argv) {
         fingerprint: { type: 'string' },
         'token-stdin': { type: 'boolean' },
         'no-save': { type: 'boolean' },
+        'no-verify': { type: 'boolean' },
         all: { type: 'boolean' },
         check: { type: 'boolean' },
         yes: { type: 'boolean', short: 'y' },

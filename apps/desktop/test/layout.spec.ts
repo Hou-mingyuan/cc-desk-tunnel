@@ -7,6 +7,8 @@ import { resolve } from 'node:path';
 import { PROTOCOL_VERSION } from '@cc-desk-tunnel/protocol';
 import type { Session } from '@cc-desk-tunnel/protocol';
 import {
+  connectionArgs,
+  signInWindow,
   createSession,
   expandActivity,
   login,
@@ -578,7 +580,10 @@ test('approval modes are described where they are chosen, and models sit behind 
   await expect(refreshModels).toBeEnabled();
   publishNewModel = true;
   await refreshModels.click();
-  await expect(models.getByRole('option', { name: /Haiku/ })).toContainText('claude-haiku-5-5');
+  await expect(models.getByRole('option', { name: /Haiku/ })).toHaveAttribute(
+    'title',
+    /claude-haiku-5-5/,
+  );
   await expect(models.getByRole('option')).toHaveCount(2);
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: '设置与账号', exact: true }).click();
@@ -616,13 +621,15 @@ test('Electron: frameless window, the project branch, files by path and window s
   const profile = resolve('.local/ui-test/profile-layout');
   rmSync(profile, { recursive: true, force: true });
   const application = await _electron.launch({
-    args: [resolve('apps/desktop'), '--smoke-test', `--user-data-dir=${profile}`],
+    args: [resolve('apps/desktop'), '--smoke-test', ...connectionArgs(profile)],
     env,
   });
   try {
-    const page = await application.firstWindow();
-    await expect(page.getByRole('heading', { name: '连接代理服务', exact: true })).toBeVisible();
-    await login(page);
+    const launcher = await application.firstWindow();
+    await expect(
+      launcher.getByRole('heading', { name: '连接代理服务', exact: true }),
+    ).toBeVisible();
+    const page = await signInWindow(application);
     // This repository stands in for the user's project.
     const repository = resolve('.');
     const picked = resolve('package.json');
@@ -640,7 +647,10 @@ test('Electron: frameless window, the project branch, files by path and window s
     const branch = execFileSync('git', ['branch', '--show-current'], { encoding: 'utf8' }).trim();
     await expect(page.locator('.composer-context')).toContainText(branch);
     await page.getByRole('button', { name: /^添加文件/ }).click();
-    await expect(page.getByRole('textbox', { name: '消息' })).toHaveValue(`"${picked}" `);
+    await expect(page.getByRole('textbox', { name: '消息' }).locator('.path-chip')).toHaveAttribute(
+      'data-path',
+      picked,
+    );
     await page.screenshot({ path: resolve(screenshots, 'redesign', '15-桌面窗口.png') });
     // Zoom is the page's own shortcut, one step a press: Electron's default menu no longer adds its own.
     const zoom = () =>

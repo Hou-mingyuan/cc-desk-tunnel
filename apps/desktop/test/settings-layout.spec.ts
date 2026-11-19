@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { PROTOCOL_VERSION } from '@cc-desk-tunnel/protocol';
-import { login, screenshots } from './helpers.ts';
+import { connectionArgs, signInWindow, screenshots } from './helpers.ts';
 
 const shots = resolve(screenshots, 'settings-layout');
 const every = [
@@ -109,6 +109,7 @@ async function serve(page: Page, url: string, shells?: string[], chosen: unknown
             bashOutputMaxChars: null,
             attribution: null,
             includeGitInstructions: null,
+            enableArtifact: null,
             toolSearch: null,
             denyInsteadOfPrompting: null,
             blockWritesOutsideWorkingDirectories: null,
@@ -261,13 +262,15 @@ test('Electron: this computer’s settings as the desktop client shows them', as
   const profile = resolve('.local/ui-test/profile-settings-layout');
   rmSync(profile, { recursive: true, force: true });
   const application = await _electron.launch({
-    args: [resolve('apps/desktop'), '--smoke-test', `--user-data-dir=${profile}`],
+    args: [resolve('apps/desktop'), '--smoke-test', ...connectionArgs(profile)],
     env,
   });
   try {
-    const page = await application.firstWindow();
-    await expect(page.getByRole('heading', { name: '连接代理服务', exact: true })).toBeVisible();
-    await login(page);
+    const launcher = await application.firstWindow();
+    await expect(
+      launcher.getByRole('heading', { name: '连接代理服务', exact: true }),
+    ).toBeVisible();
+    const page = await signInWindow(application);
     await picture(
       page,
       resolve(shots, 'desktop'),

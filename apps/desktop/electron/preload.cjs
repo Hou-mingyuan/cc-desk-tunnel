@@ -11,11 +11,11 @@ contextBridge.exposeInMainWorld('desktop', {
     return () => ipcRenderer.removeListener('shared:changed', listener);
   },
   setBusy: (runs) => ipcRenderer.invoke('busy:set', runs),
-  connections: () => ipcRenderer.invoke('connections:list'),
-  createConnection: (name) => ipcRenderer.invoke('connections:create', name),
-  openConnection: (id) => ipcRenderer.invoke('connections:open', id),
-  renameConnection: (id, name) => ipcRenderer.invoke('connections:rename', id, name),
-  removeConnection: (id) => ipcRenderer.invoke('connections:remove', id),
+  accounts: () => ipcRenderer.invoke('accounts:list'),
+  openAccount: (id) => ipcRenderer.invoke('accounts:open', id),
+  renameAccount: (id, name) => ipcRenderer.invoke('accounts:rename', id, name),
+  forgetAccount: (id) => ipcRenderer.invoke('accounts:forget', id),
+  newLoginWindow: () => ipcRenderer.invoke('login:window'),
   chooseProject: () => ipcRenderer.invoke('project:choose'),
   asOnDisk: (path) => ipcRenderer.invoke('project:spelling', path),
   foldersExist: (folders) => ipcRenderer.invoke('folders:exist', folders),
@@ -38,7 +38,18 @@ contextBridge.exposeInMainWorld('desktop', {
   createWorkspace: () => ipcRenderer.invoke('workspace:create'),
   removeWorkspace: (directory) => ipcRenderer.invoke('workspace:remove', directory),
   loadLogin: () => ipcRenderer.invoke('login:load'),
+  loadLauncher: () => ipcRenderer.invoke('launcher:load'),
   saveLogin: (login) => ipcRenderer.invoke('login:save', login),
+  signOut: (error) => ipcRenderer.invoke('login:leave', error),
+  startSignIn: (login) => ipcRenderer.invoke('launcher:start', login),
+  cancelSignIn: () => ipcRenderer.invoke('launcher:cancel'),
+  widenLauncher: (wide) => ipcRenderer.invoke('launcher:wide', wide),
+  reportSignIn: (report) => ipcRenderer.invoke('signin:report', report),
+  onSignIn: (callback) => {
+    const listener = (_event, report) => callback(report);
+    ipcRenderer.on('signin:report', listener);
+    return () => ipcRenderer.removeListener('signin:report', listener);
+  },
   loadDrafts: () => ipcRenderer.invoke('drafts:load'),
   saveDrafts: (drafts) => ipcRenderer.invoke('drafts:save', drafts),
   loadSchedules: (initial) => ipcRenderer.invoke('schedules:load', initial),
@@ -58,7 +69,7 @@ contextBridge.exposeInMainWorld('desktop', {
   },
   zoom: (direction) =>
     webFrame.setZoomLevel(direction ? webFrame.getZoomLevel() + Math.sign(direction) * 0.5 : 0),
-  quit: (all) => ipcRenderer.invoke('app:quit', all),
+  quit: () => ipcRenderer.invoke('app:quit'),
   version: () => ipcRenderer.invoke('app:version'),
   releaseNotes: (version) => ipcRenderer.invoke('release:notes', version),
   device: () => ipcRenderer.invoke('device:get'),

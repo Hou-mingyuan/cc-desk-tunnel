@@ -3,7 +3,16 @@ import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { createSession, login, send, settled, screenshots } from './helpers.ts';
+import {
+  connectionArgs,
+  signInWindow,
+  connectionDirectory,
+  createSession,
+  login,
+  send,
+  settled,
+  screenshots,
+} from './helpers.ts';
 
 test('message dates, selection menu, code copy and conversation find work together', async ({
   page,
@@ -179,7 +188,7 @@ test('Electron copies text and supplies the native editing context menu', async 
     ),
   );
   const application = await _electron.launch({
-    args: [resolve('apps/desktop'), '--smoke-test', `--user-data-dir=${profile}`],
+    args: [resolve('apps/desktop'), '--smoke-test', ...connectionArgs(profile)],
     env,
   });
   const previous = await application.evaluate(({ clipboard }) => clipboard.readText());
@@ -196,15 +205,6 @@ test('Electron copies text and supplies the native editing context menu', async 
       BrowserWindow.getAllWindows()[0].webContents.paste(),
     );
     await expect(input).toHaveValue('复制粘贴测试');
-    // A picture that is only on the clipboard is saved in the profile, and only a picture is.
-    const saved = await page.evaluate(() =>
-      window.desktop!.saveImage('image/png', new Uint8Array([137, 80, 78, 71])),
-    );
-    expect(saved.startsWith(resolve(profile, 'pasted'))).toBe(true);
-    expect(readFileSync(saved)).toEqual(Buffer.from([137, 80, 78, 71]));
-    await expect(
-      page.evaluate(() => window.desktop!.saveImage('text/plain', new Uint8Array([1]))),
-    ).rejects.toThrow(/图片/);
     const roles = await application.evaluate(({ BrowserWindow, Menu }) => {
       const build = Menu.buildFromTemplate;
       let items: unknown[] = [];
@@ -238,6 +238,20 @@ test('Electron copies text and supplies the native editing context menu', async 
         expect.objectContaining({ role: 'paste', enabled: true }),
       ]),
     );
+    // A picture that is only on the clipboard is saved with the connection, and only a picture is; the sign-in
+    // window, no connection's yet, keeps none.
+    await expect(
+      page.evaluate(() => window.desktop!.saveImage('image/png', new Uint8Array([137]))),
+    ).rejects.toThrow(/登录/);
+    const signedIn = await signInWindow(application);
+    const saved = await signedIn.evaluate(() =>
+      window.desktop!.saveImage('image/png', new Uint8Array([137, 80, 78, 71])),
+    );
+    expect(saved.startsWith(resolve(connectionDirectory(profile), 'pasted'))).toBe(true);
+    expect(readFileSync(saved)).toEqual(Buffer.from([137, 80, 78, 71]));
+    await expect(
+      signedIn.evaluate(() => window.desktop!.saveImage('text/plain', new Uint8Array([1]))),
+    ).rejects.toThrow(/图片/);
   } finally {
     await application.evaluate(({ clipboard }, text) => clipboard.writeText(text), previous);
     await application.close();

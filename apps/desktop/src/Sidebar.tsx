@@ -19,7 +19,6 @@ import NoticeBell from './NoticeBell.tsx';
 import type { Notifications } from './notifications.ts';
 import { ago, folderName, isInside, pathKey } from './paths.ts';
 import { setPrefs, toggled, usePrefs } from './prefs.ts';
-import { useConnectionName } from './shared.ts';
 import { IconButton } from './ui.tsx';
 import { terminalState } from './RunStatus.tsx';
 import type { MenuPosition } from './ui.tsx';
@@ -65,6 +64,7 @@ export default function Sidebar({
   createInProject,
   sessionMenu,
   projectMenu,
+  footer,
 }: {
   localProjects?: boolean;
   sessions: Session[];
@@ -87,9 +87,9 @@ export default function Sidebar({
   createInProject: (path: string) => void;
   sessionMenu: (session: Session, position: MenuPosition) => void;
   projectMenu: (path: string, position: MenuPosition) => void;
+  footer?: ReactNode;
 }) {
   const prefs = usePrefs();
-  const connectionName = useConnectionName();
   const [search, setSearch] = useState('');
   const [searching, setSearching] = useState(false);
   // The lists listed in full rather than their latest few, for this window only.
@@ -305,10 +305,7 @@ export default function Sidebar({
   return (
     <aside className="sidebar" ref={aside}>
       <div className="sidebar-brand">
-        <span className="brand">
-          CC Desk Tunnel
-          {connectionName && <span className="brand-connection">{connectionName}</span>}
-        </span>
+        <span className="brand">CC Desk Tunnel</span>
         <NoticeBell notifications={notifications} open={select} />
         <IconButton
           title={searching ? '关闭搜索' : '搜索'}
@@ -497,6 +494,7 @@ export default function Sidebar({
           pinned.length === 0 &&
           othersCount === 0 && <p className="list-empty">没有匹配会话</p>}
       </nav>
+      {footer}
       {card && (
         <div className="session-card" role="tooltip" style={{ top: card.top, left: card.left }}>
           <strong>{card.session.title}</strong>
