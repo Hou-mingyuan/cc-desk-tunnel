@@ -107,11 +107,11 @@ sudo cc-desk-tunnel help      # 全部命令：更换凭据、备份恢复、证
 - macOS（实验性）：Apple 芯片或 Intel 的 `.dmg`，见 [macOS 客户端](docs/macos.md)。
 - Linux x64（实验性）：`.deb`，见 [Linux 客户端](docs/linux.md)。
 
-Windows 安装包自带 PowerShell 7 和 OpenSSH，不需要另装任何东西。启动后填入上一步的三项信息并连接。首次运行会遇到 SmartScreen 提示，处理方法见[杀毒软件与 SmartScreen](#杀毒软件与-smartscreen)。macOS 与 Linux 的客户端没有签名，升级时需要重新下载安装。
+Windows 安装包自带 PowerShell 7、OpenSSH 和终端客户端 `ccdt`，不需要另装任何东西。启动后填入上一步的三项信息并连接。首次运行会遇到 SmartScreen 提示，处理方法见[杀毒软件与 SmartScreen](#杀毒软件与-smartscreen)。macOS 与 Linux 的客户端没有签名，升级时需要重新下载安装。
 
 #### 终端客户端 ccdt
 
-Windows，在 PowerShell 里运行：
+装了 Windows 图形客户端就已经有 `ccdt`，新开的终端窗口里直接用。只用终端时单独安装，Windows 在 PowerShell 里运行：
 
 ```powershell
 irm https://raw.githubusercontent.com/sun168567/cc-desk-tunnel/main/deploy/install-ccdt.ps1 | iex
@@ -189,9 +189,10 @@ curl -fsSL https://raw.githubusercontent.com/sun168567/cc-desk-tunnel/main/deplo
 | 证书不受信任 / 指纹不匹配 / 证书已过期 | TLS 校验没有通过 | 自签证书填写安装时给出的 SHA256 指纹；换过证书后用新指纹；过期则在服务器上续期 |
 | 服务凭据不正确 | 已连到服务端，凭据被拒绝 | 核对凭据；连续失败多次会被暂时拒绝 |
 | 版本不一致 | 客户端与服务端不是同一版本 | 按登录页的提示升级 |
-| SSH 服务被拦截 / 找不到 / 没能启动 | 凭据已通过，本机的 `sshd.exe` 或 PowerShell 没能运行 | 见上一节，先看安全软件的保护记录 |
+| SSH 服务被拦截 / 找不到 / 没能启动 | 凭据已通过，本机的 `sshd.exe` 或 PowerShell 没能运行 | 提示里带有它的输出时按输出处理；被拦截或找不到时见上一节，先看安全软件的保护记录 |
 | 执行通道没有就绪 | 凭据已通过，本机 SSH 服务已启动，服务端经执行通道连不回本机 | 提示里带有具体原因时按它处理；经反向代理或系统代理连接时，确认它允许同一地址同时有多条连接 |
-| 服务端经隧道连不上本机的 SSH 服务 | 执行通道已建立，探测命令没有应答 | 检查安全软件是否拦截了内置的 `sshd.exe` 或 PowerShell |
+| 本机 SSH 服务没有执行探测命令 | 执行通道已建立，本机 SSH 服务没有执行服务端发来的探测命令 | 按“本机答复”处理，那是本机 shell 或 `ssh` 的原话 |
+| 本机 OpenSSH 的默认 shell 是 … | 系统 OpenSSH 设了 `DefaultShell`（注册表 `HKLM\SOFTWARE\OpenSSH`），内置的 `sshd.exe` 也用它执行命令 | 设为 PowerShell、pwsh 或 Git Bash 时客户端自动处理，命令仍按 cmd 执行；其他 shell 需删除或改回这个值 |
 
 ### 用着用着断开时
 

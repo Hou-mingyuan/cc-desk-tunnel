@@ -600,7 +600,9 @@ handle('service:upgrade', async (event, config) => {
 });
 handle('ccdt:open', async (_event, request) => {
   const { openSession } = await import(pathToFileURL(path.join(__dirname, 'ccdt.mjs')).href);
-  return openSession(request, { version: app.getVersion() });
+  // The ccdt this client carries, where its package has one (Windows).
+  const own = app.isPackaged ? path.join(process.resourcesPath, 'ccdt', 'ccdt.cmd') : undefined;
+  return openSession(request, { version: app.getVersion(), own });
 });
 // The service token is kept only when the user asks, encrypted for the current account of the system (DPAPI on
 // Windows, the login keychain on macOS) with the key of the profile all processes share. The address is kept from
@@ -1197,9 +1199,15 @@ function createWindow(partition, { width, height, shown }) {
   window.on('page-title-updated', (event) => event.preventDefault());
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   // Electron does not provide an editing menu by default. Native roles keep text selection, undo and paste
-  // in the focused input, without exposing clipboard reads to the renderer.
+  // in the focused input, without exposing clipboard reads to the renderer. Elsewhere selected text gets the
+  // copy a browser offers, as where a long press by finger is left to the system; the page's own menus
+  // cancel the event, and then none is shown here.
   window.webContents.on('context-menu', (_event, params) => {
-    if (!params.isEditable) return;
+    if (!params.isEditable) {
+      if (params.selectionText)
+        Menu.buildFromTemplate([{ role: 'copy', label: '复制' }]).popup({ window });
+      return;
+    }
     Menu.buildFromTemplate([
       { role: 'undo', label: '撤销', enabled: params.editFlags.canUndo },
       { role: 'redo', label: '重做', enabled: params.editFlags.canRedo },

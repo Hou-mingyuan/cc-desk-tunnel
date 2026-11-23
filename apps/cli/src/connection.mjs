@@ -36,10 +36,21 @@ export function proxyFor(url, env = process.env) {
 // One signed-in connection to the service, as this computer. `closed` resolves when it ends, whichever side ended
 // it; `lost` tells a fault on the way from an end asked for.
 export class Service extends EventEmitter {
-  static async connect({ url, fingerprint, token, deviceId, waits, log = () => {} }) {
+  // Without `tunnel` the connection opens no execution channel: commands reach this computer by another of its
+  // connections, `ccdt online`'s, or this one is for no session at all.
+  static async connect({
+    url,
+    fingerprint,
+    token,
+    deviceId,
+    waits,
+    tunnel = true,
+    log = () => {},
+  }) {
     const service = new Service();
+    service.tunnel = tunnel;
     service.bridge = await openProxyBridge(
-      { url, fingerprint, waits },
+      { url, fingerprint, waits, tunnel },
       {
         ...components(),
         environment: {},
@@ -119,9 +130,10 @@ export class Service extends EventEmitter {
       socket.on('error', () => {});
     });
   }
-  // What the service answers to a command: its `response`, or the message it answers with instead.
+  // What the service answers to a command: its `response`, or the message it answers with instead. A command may
+  // bring its own request ID, as a message does whose events are to be told from others before the answer comes.
   request(command) {
-    const requestId = randomUUID();
+    const requestId = command.requestId ?? randomUUID();
     return new Promise((resolve, reject) => {
       if (this.ended) return reject(new Error('连接已关闭。'));
       this.waiting.set(requestId, { resolve, reject });
