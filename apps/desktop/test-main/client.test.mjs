@@ -4,10 +4,13 @@ import { randomUUID } from 'node:crypto';
 import { ProxyClient, RequestInterruptedError } from '../src/client.ts';
 import { PROTOCOL_VERSION } from '@cc-desk-tunnel/protocol';
 import { conversation, transcript } from '../src/transcript.ts';
+import { t } from '../src/i18n.ts';
+import { createI18n } from '@cc-desk-tunnel/i18n';
 import { describe, duration, summarize } from '../src/activity.ts';
 import {
   describeSchedule,
   formatTasks,
+  outcomeText,
   nextRun,
   parseTasks,
   taskMessage,
@@ -49,9 +52,11 @@ function fixture(t) {
   socket.message({
     type: 'ready',
     protocolVersion: PROTOCOL_VERSION,
+    serverDeviceId: '00000000-0000-4000-8000-000000000001',
     version: '0.0.1',
     connectionId: randomUUID(),
     adapter: 'simulation',
+    projects: [],
     sessions,
   });
   t.after(() => {
@@ -421,19 +426,48 @@ test('late responses cannot restore an evicted session or seed a cursor from uns
   snapshot(sessions[0], []);
 });
 
-test('an event of a session not shown, as the quota of a terminal sent to all, leaves its cached history to be fetched', async (t) => {
+test('the quota is the account’s: each change the service sends sets it, and no session’s figures touch it', (t) => {
+  const { client, socket, sessions } = fixture(t);
+  assert.equal(client.state.quota, null);
+  const rateLimits = {
+    available: true,
+    measuredAt: new Date().toISOString(),
+    windows: [
+      {
+        name: 'five_hour',
+        utilization: 12,
+        resetsAt: new Date(Date.now() + 3600_000).toISOString(),
+      },
+    ],
+  };
+  socket.message({ type: 'quota', rateLimits });
+  assert.deepEqual(client.state.quota, { rateLimits });
+  client.select(sessions[0].id);
+  socket.message({
+    type: 'session.event',
+    event: {
+      ...event(sessions[0].id, 1),
+      payload: { type: 'native.metrics', context: null, usage: null },
+    },
+  });
+  assert.deepEqual(client.state.quota, { rateLimits });
+  socket.message({ type: 'quota', rateLimits, error: '原生接口读取失败' });
+  assert.equal(client.state.quota.error, '原生接口读取失败');
+});
+
+test('an event of a session not shown leaves its cached history to be fetched', async (t) => {
   const { client, socket, sessions, snapshot } = fixture(t);
   const [held, shown] = sessions;
   client.select(held.id);
   snapshot(held, [event(held.id, 1)]);
   client.select(shown.id);
   snapshot(shown, []);
-  // While another session is shown, the terminal's turn is recorded (2) and its quota sent to every connection (3).
+  // While another session is shown, two of its events are recorded (2, 3), and only the second reaches this one.
   socket.message({
     type: 'session.event',
     event: {
       ...event(held.id, 3),
-      payload: { type: 'native.metrics', context: null, usage: null, rateLimits: null },
+      payload: { type: 'native.metrics', context: null, usage: null },
     },
   });
   await new Promise((resolve) => setTimeout(resolve, 50));
@@ -465,9 +499,9 @@ test('native input receipts update the existing user row without duplicating mes
     sequence: index + 1,
     createdAt: new Date().toISOString(),
   }));
-  assert.equal(transcript(events).length, 1);
-  assert.equal(transcript(events)[0].delivery, 'received');
-  assert.equal(transcript(events.slice(0, 3))[0].delivery, 'queued');
+  assert.equal(transcript(events, t).length, 1);
+  assert.equal(transcript(events, t)[0].delivery, 'received');
+  assert.equal(transcript(events.slice(0, 3), t)[0].delivery, 'queued');
 });
 
 test('account telemetry can refresh without selecting or loading a conversation', (t) => {
@@ -528,16 +562,16 @@ test('conversation folds a finished turn into question, activity and answer', ()
       exitCode: null,
     }),
   ];
-  let [turn] = conversation(events);
+  let [turn] = conversation(events, t);
   assert.equal(turn.endedAt, undefined);
   assert.deepEqual(
     turn.steps.map((step) => step.kind),
     ['assistant', 'work'],
   );
-  assert.equal(summarize(turn.steps[1], true, true).label, '正在编辑文件');
+  assert.equal(summarize(t, turn.steps[1], true, true).label, '正在编辑文件');
   assert.deepEqual(
     (({ verb, subject, added, removed }) => ({ verb, subject, added, removed }))(
-      describe(turn.steps[1].items[1], true),
+      describe(t, turn.steps[1].items[1], true),
     ),
     { verb: '编辑', subject: 'app.py', added: 3, removed: 1 },
   );
@@ -557,13 +591,16 @@ test('conversation folds a finished turn into question, activity and answer', ()
       randomUUID(),
     ),
   );
-  const turns = conversation(events);
+  const turns = conversation(events, t);
   [turn] = turns;
   assert.equal(turns.length, 2);
   assert.equal(turn.answer.text, '改好了。');
   assert.equal(turn.tools, 2);
-  assert.equal(duration(turn.startedAt, turn.endedAt), '1 分 7 秒');
-  assert.equal(summarize(turn.steps[1], false, false).label, '读取了 1 个文件，编辑了 1 个文件');
+  assert.equal(duration(t, turn.startedAt, turn.endedAt), '1 分 7 秒');
+  assert.equal(summarize(t, turn.steps[1], false, false).label, '读取了 1 个文件，编辑了 1 个文件');
+  const en = createI18n('en').t;
+  assert.equal(summarize(en, turn.steps[1], false, false).label, 'Read 1 file, edited 1 file');
+  assert.equal(duration(en, turn.startedAt, turn.endedAt), '1 min 7 s');
   assert.equal(turns[1].endedAt, undefined);
 });
 
@@ -578,11 +615,16 @@ test('scheduled tasks: the file round-trips, bad tasks are named, and rules find
     model: null,
     effort: 'high',
   };
-  const text = formatTasks([task]);
+  const text = formatTasks(t, [task]);
   assert.ok(JSON.parse(text).说明.length > 0);
-  assert.deepEqual(parseTasks(text), { tasks: [task], problems: [] });
+  assert.deepEqual(parseTasks(t, text), { tasks: [task], problems: [] });
+  // The file explains itself in the window's language, and is read the same in any.
+  const en = createI18n('en').t;
+  assert.ok(JSON.parse(formatTasks(en, [task])).about.length > 0);
+  assert.deepEqual(parseTasks(en, text), { tasks: [task], problems: [] });
   // What Claude or an editor may leave behind: missing optional fields, a bad task beside a good one.
   const mixed = parseTasks(
+    t,
     JSON.stringify({
       tasks: [
         { ...task, model: undefined, effort: undefined, enabled: undefined },
@@ -598,9 +640,9 @@ test('scheduled tasks: the file round-trips, bad tasks are named, and rules find
     mixed.problems.map((problem) => problem.split('：')[0]),
     ['“坏时间”', '“重复”', '“太频繁”', '第 5 个任务'],
   );
-  assert.ok(parseTasks('{ not json').broken);
-  assert.ok(parseTasks('{}').broken);
-  assert.deepEqual(parseTasks(''), { tasks: [], problems: [] });
+  assert.ok(parseTasks(t, '{ not json').broken);
+  assert.ok(parseTasks(t, '{}').broken);
+  assert.deepEqual(parseTasks(t, ''), { tasks: [], problems: [] });
 
   const local = (...parts) => new Date(...parts).getTime();
   // 2026-10-07 is a Wednesday.
@@ -622,11 +664,21 @@ test('scheduled tasks: the file round-trips, bad tasks are named, and rules find
     local(2026, 9, 7, 10, 1),
   );
   assert.equal(nextRun({ type: 'once', at: '2026-10-07T10:00' }, wednesday), null);
-  assert.equal(describeSchedule(task.schedule), '每周一、五 09:30');
-  assert.equal(describeSchedule({ type: 'interval', minutes: 120 }), '每 2 小时');
+  assert.equal(describeSchedule(t, task.schedule), '每周一、五 09:30');
+  assert.equal(describeSchedule(t, { type: 'interval', minutes: 120 }), '每 2 小时');
+  assert.equal(describeSchedule(en, task.schedule), 'Every Mon and Fri at 09:30');
+  assert.equal(describeSchedule(en, { type: 'interval', minutes: 60 }), 'Every hour');
   assert.equal(
-    taskMessage(task, wednesday),
+    taskMessage(t, task, wednesday),
     '[定时任务「日报」· 计划时间 2026-10-07 10:00]\n\n整理今天的提交',
+  );
+  assert.equal(
+    outcomeText(t, { at: wednesday, status: 'missed', due: wednesday }),
+    '错过了 2026-10-07 10:00 的一次',
+  );
+  assert.equal(
+    outcomeText(en, { at: wednesday, status: 'blocked' }).startsWith('can’t send now'),
+    true,
   );
 });
 
@@ -675,9 +727,11 @@ test('a remote connection that breaks is made again through a new bridge, and on
     socket.message({
       type: 'ready',
       protocolVersion: PROTOCOL_VERSION,
+      serverDeviceId: '00000000-0000-4000-8000-000000000001',
       version: '0.0.1',
       connectionId: randomUUID(),
       adapter: 'claude-code',
+      projects: [],
       sessions: [session],
     });
   const settle = () => new Promise((resolve) => setTimeout(resolve, 5));

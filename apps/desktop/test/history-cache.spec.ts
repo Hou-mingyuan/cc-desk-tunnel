@@ -30,7 +30,12 @@ test('history read before shows from disk, the service sends only what came sinc
   const profile = join(directory, 'profile');
   const launch = (fresh = false) =>
     _electron.launch({
-      args: [resolve('apps/desktop'), '--smoke-test', ...connectionArgs(profile, fresh)],
+      args: [
+        resolve('apps/desktop'),
+        '--smoke-test',
+        '--lang=zh-CN',
+        ...connectionArgs(profile, fresh),
+      ],
       env,
     });
   // What the window asks the service for.
@@ -52,6 +57,8 @@ test('history read before shows from disk, the service sends only what came sinc
     );
   const asked = (type: string) => sent.filter((frame) => frame.type === type);
   const signIn = async (page: Page, again = false) => {
+    // The mode buttons come with the form: until it is drawn they are not visible either.
+    await page.getByLabel('服务地址').waitFor();
     const simulated = page.getByRole('button', { name: '本地模拟', exact: true });
     if (await simulated.isVisible()) await simulated.click();
     // A connection signed in before keeps to its service.
@@ -96,7 +103,6 @@ test('history read before shows from disk, the service sends only what came sinc
     const other = server.store.create(randomUUID(), '别处删除的会话', folder, device);
     for (let i = 0; i < 3; i++) turn(session, i);
     turn(other, 9);
-    await page.evaluate((folder) => window.desktop!.saveShared('projects', [folder]), folder);
     page = await signIn(page);
     await page.locator('.session-select').filter({ hasText: '别处删除的会话' }).click();
     await expect(page.getByText('缓存问题9', { exact: true })).toBeVisible();

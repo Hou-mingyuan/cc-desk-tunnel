@@ -13,8 +13,10 @@ import {
   terminalStatuses,
 } from '@cc-desk-tunnel/protocol';
 import { deviceTerms, systemShell } from './device-terms.ts';
+import { deviceSection } from './session-prompt.ts';
 import type { Execution } from './device-terms.ts';
-import { DomainError } from './errors.ts';
+import { phrase } from '@cc-desk-tunnel/i18n';
+import { DomainError, said } from './errors.ts';
 import type {
   Device,
   DevicePlatform,
@@ -23,6 +25,7 @@ import type {
   EventPayload,
   HistoryPage,
   PermissionMode,
+  Project,
   Session,
   SessionEvent,
   SessionSnapshot,
@@ -41,6 +44,10 @@ function setMode(session: Session, permissionMode: PermissionMode) {
 }
 const pageEvents = 1000;
 const pageBytes = 512 * 1024;
+// The folders the desktop makes for plain sessions, a day and under it a time. Before the service kept the
+// projects, the folder of every other session was taken for one; this tells the two apart once, when the list is
+// first made from the sessions (and for a session from before computers were told apart, when it gets one).
+const plainFolder = /[\\/]\d{4}-\d{2}-\d{2}[\\/]\d{6}(-\d+)?[\\/]*$/;
 
 // What goes beside the copy of the history made before it is rewritten.
 const backupNote = (file: string) => `CC Desk Tunnel：会话历史备份
@@ -109,12 +116,18 @@ export class SessionStore {
       CREATE TABLE IF NOT EXISTS device_shells (
         device_id TEXT PRIMARY KEY, shells TEXT NOT NULL, preferred TEXT
       );
+      CREATE TABLE IF NOT EXISTS projects (
+        device_id TEXT NOT NULL, path_key TEXT NOT NULL, path TEXT NOT NULL, device TEXT NOT NULL,
+        name TEXT, created_at TEXT NOT NULL,
+        PRIMARY KEY (device_id, path_key)
+      );
     `);
     this.database.prepare("INSERT OR IGNORE INTO history_meta VALUES ('id', ?)").run(randomUUID());
     try {
       this.importJson();
       this.restoreUpdatedAt();
       this.mergeFragments();
+      this.seedProjects();
       for (const session of this.list()) {
         if (!session.activeRun) continue;
         const { id: runId, connectionId } = session.activeRun;
@@ -146,13 +159,15 @@ export class SessionStore {
             )
           )
             continue;
+          const { message: output, phrase: note } = said(
+            phrase(native ? 'service:tool.restartedUnknown' : 'service:tool.restartedSimulated'),
+          );
           this.append(session.id, runId, {
             type: 'tool.result',
             toolId,
             status: native ? 'unknown' : 'cancelled',
-            output: native
-              ? '服务重启；工具最终执行结果未确认，不能自动重放。'
-              : '服务重启；模拟工具未执行。',
+            output,
+            phrase: note,
             exitCode: null,
           });
         }
@@ -160,7 +175,7 @@ export class SessionStore {
           type: 'run.status',
           status: 'cancelled',
           connectionId,
-          reason: '服务重启，运行未重放。',
+          reason: phrase('service:stopped.serviceRestarted'),
         });
       }
     } catch (error) {
@@ -319,6 +334,75 @@ export class SessionStore {
     );
   }
 
+  // The projects start as the folders the sessions are in, but for those of plain sessions: the desktop's own
+  // folders for them, and the service's (its native/ directory).
+  private seedProjects() {
+    if (this.database.prepare("SELECT 1 FROM migrations WHERE name = 'projects'").get()) return;
+    const own = join(this.directory, 'native');
+    this.database.exec('BEGIN');
+    try {
+      // In the order they were made, the first session of a folder giving the project its place in the list.
+      const sessions = this.list().sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      for (const session of sessions)
+        if (
+          session.device &&
+          !plainFolder.test(session.projectPath) &&
+          !session.projectPath.startsWith(own)
+        )
+          this.register(session.device, session.projectPath, undefined, session.createdAt);
+      this.database.prepare("INSERT INTO migrations VALUES ('projects')").run();
+      this.database.exec('COMMIT');
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+  projects(): Project[] {
+    return this.database
+      .prepare(
+        `SELECT projects.device, projects.path, projects.name, projects.created_at, native_roots.root
+        FROM projects JOIN native_roots USING (device_id, path_key) ORDER BY projects.created_at, projects.rowid`,
+      )
+      .all()
+      .map((row) => ({
+        device: JSON.parse(String(row.device)) as Device,
+        path: String(row.path),
+        ...(row.name ? { name: String(row.name) } : {}),
+        root: String(row.root),
+        createdAt: String(row.created_at),
+      }));
+  }
+  isProject(deviceId: string, path: string) {
+    return !!this.database
+      .prepare('SELECT 1 FROM projects WHERE device_id = ? AND path_key = ?')
+      .get(deviceId, pathKey(path));
+  }
+  // Makes a folder of a computer one of its projects, with the directory Claude Code is to work in for it; one
+  // that is already keeps its place in the list, and its name unless another is given.
+  register(device: Device, path: string, name?: string, createdAt = new Date().toISOString()) {
+    this.rootFor(device, path);
+    this.database
+      .prepare(
+        `INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(device_id, path_key) DO UPDATE SET name = COALESCE(excluded.name, projects.name)`,
+      )
+      .run(device.id, pathKey(path), path, JSON.stringify(device), name ?? null, createdAt);
+  }
+  // The folder and its sessions stay where they are, and so does the directory Claude Code worked in for it: made a
+  // project again, it has its memory back.
+  unregister(deviceId: string, path: string) {
+    const removed = this.database
+      .prepare('DELETE FROM projects WHERE device_id = ? AND path_key = ?')
+      .run(deviceId, pathKey(path));
+    if (!removed.changes) throw new DomainError('not_found', phrase('service:project.notFound'));
+  }
+  renameProject(deviceId: string, path: string, name: string) {
+    const renamed = this.database
+      .prepare('UPDATE projects SET name = ? WHERE device_id = ? AND path_key = ?')
+      .run(name || null, deviceId, pathKey(path));
+    if (!renamed.changes) throw new DomainError('not_found', phrase('service:project.notFound'));
+  }
+
   list(): Session[] {
     return this.database
       .prepare('SELECT metadata FROM sessions')
@@ -333,7 +417,7 @@ export class SessionStore {
       const row = this.database
         .prepare('SELECT metadata, create_request_id FROM sessions WHERE id = ?')
         .get(sessionId);
-      if (!row) throw new DomainError('not_found', '会话不存在。');
+      if (!row) throw new DomainError('not_found', phrase('service:session.notFound'));
       entry = {
         record: JSON.stringify(sessionSchema.parse(JSON.parse(String(row.metadata)))),
         createRequestId: String(row.create_request_id),
@@ -434,24 +518,32 @@ export class SessionStore {
     return row ? (JSON.parse(String(row.data)) as SessionEvent) : undefined;
   }
 
-  create(requestId: string, title: string, projectPath: string, device: Device): Session {
+  // The session's folder becomes a project of its computer unless the session is a plain one.
+  create(
+    requestId: string,
+    title: string,
+    projectPath: string,
+    device: Device,
+    plain = false,
+    autoTitle = false,
+  ): Session {
     const row = this.database
       .prepare('SELECT metadata FROM sessions WHERE create_request_id = ?')
       .get(requestId);
     if (row) {
       const session = sessionSchema.parse(JSON.parse(String(row.metadata)));
       if (
-        ((!session.autoTitle || title !== '新会话') && session.title !== title) ||
+        ((!session.autoTitle || !autoTitle) && session.title !== title) ||
         session.projectPath !== projectPath
       )
-        throw new DomainError('request_conflict', '请求 ID 已被其他内容使用。');
+        throw new DomainError('request_conflict', phrase('service:request.conflict'));
       return session;
     }
     const now = new Date().toISOString();
     const session: Session = {
       id: randomUUID(),
       title,
-      autoTitle: title === '新会话',
+      autoTitle,
       projectPath,
       device,
       nativeRoot: this.rootFor(device, projectPath),
@@ -462,6 +554,7 @@ export class SessionStore {
       updatedAt: now,
       activeRun: null,
     };
+    if (!plain) this.register(device, projectPath);
     this.database
       .prepare('INSERT INTO sessions VALUES (?, ?, ?)')
       .run(session.id, JSON.stringify(session), requestId);
@@ -469,12 +562,12 @@ export class SessionStore {
   }
 
   // A plain session on this server has one directory that is both its project and its native root.
-  createOnServer(requestId: string, title: string, device: Device): Session {
+  createOnServer(requestId: string, title: string, device: Device, autoTitle = false): Session {
     const existing = this.created(requestId);
     if (existing) {
       if (existing.device?.id !== device.id)
-        throw new DomainError('request_conflict', '请求 ID 已被其他内容使用。');
-      return this.create(requestId, title, existing.projectPath, device);
+        throw new DomainError('request_conflict', phrase('service:request.conflict'));
+      return this.create(requestId, title, existing.projectPath, device, true, autoTitle);
     }
     const root = randomUUID();
     const projectPath = join(this.directory, 'native', root);
@@ -483,7 +576,7 @@ export class SessionStore {
       this.database
         .prepare('INSERT INTO native_roots VALUES (?, ?, ?)')
         .run(device.id, pathKey(projectPath), root);
-      const session = this.create(requestId, title, projectPath, device);
+      const session = this.create(requestId, title, projectPath, device, true, autoTitle);
       this.database.exec('COMMIT');
       return session;
     } catch (error) {
@@ -502,9 +595,9 @@ export class SessionStore {
   // qualifies: cutting at one added mid-run would leave half a run behind.
   forkPoint(sessionId: string, messageId: string) {
     const event = this.userMessage(sessionId, messageId);
-    if (!event) throw new DomainError('not_found', '消息不存在。');
+    if (!event) throw new DomainError('not_found', phrase('service:message.notFound'));
     if (this.runEvents(sessionId, event.runId)[0]!.sequence !== event.sequence)
-      throw new DomainError('fork_point', '运行途中追加的消息不能作为分叉点。');
+      throw new DomainError('fork_point', phrase('service:fork.midRun'));
     return event.sequence;
   }
   // Copies a session and its events before `beforeSequence` under `id`, onto the computer that asked and
@@ -542,6 +635,8 @@ export class SessionStore {
     );
     this.database.exec('BEGIN');
     try {
+      // A copy placed in a folder of its own makes it a project; one beside its source is where that is.
+      if (place.projectPath) this.register(place.device, place.projectPath);
       this.database
         .prepare('INSERT INTO sessions VALUES (?, ?, ?)')
         .run(id, JSON.stringify(session), requestId);
@@ -565,7 +660,7 @@ export class SessionStore {
   snapshot(sessionId: string, afterSequence = 0): SessionSnapshot {
     const { session } = this.get(sessionId);
     if (afterSequence > this.lastSequence(sessionId))
-      throw new DomainError('invalid_cursor', '恢复游标超出历史范围。');
+      throw new DomainError('invalid_cursor', phrase('service:history.resumeCursor'));
     return { session, events: this.events(sessionId, afterSequence) };
   }
 
@@ -580,7 +675,7 @@ export class SessionStore {
     const { session } = this.get(sessionId);
     const last = this.lastSequence(sessionId);
     if (afterSequence > last || (beforeSequence !== undefined && beforeSequence > last + 1))
-      throw new DomainError('invalid_cursor', '历史游标超出范围。');
+      throw new DomainError('invalid_cursor', phrase('service:history.cursor'));
     if (afterSequence > 0) {
       const size = this.database
         .prepare(
@@ -691,7 +786,8 @@ export class SessionStore {
 
   delete(sessionId: string): void {
     const { session } = this.get(sessionId);
-    if (session.activeRun) throw new DomainError('run_active', '请先停止运行再删除会话。');
+    if (session.activeRun)
+      throw new DomainError('run_active', phrase('service:session.deleteRunActive'));
     this.database.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
     this.known.delete(sessionId);
   }
@@ -702,7 +798,8 @@ export class SessionStore {
     effort?: Effort | null,
   ) {
     const { session } = this.get(sessionId);
-    if (session.activeRun) throw new DomainError('run_active', '请先结束当前运行再修改审批模式。');
+    if (session.activeRun)
+      throw new DomainError('run_active', phrase('service:session.modeRunActive'));
     setMode(session, permissionMode);
     if (model !== undefined) session.model = model;
     if (effort !== undefined) session.effort = effort;
@@ -719,11 +816,13 @@ export class SessionStore {
     this.save(session);
     return session;
   }
-  // Points the session at a project directory on a computer, which may be another one than it was on. What
-  // Claude knows of either changes with the next message: `notice`.
+  // Points the session at a directory on a computer, which may be another one than it was on, and makes the
+  // directory a project there. What Claude knows of either changes with the next message: `notice`.
   move(sessionId: string, projectPath: string, device: Device) {
     const { session } = this.get(sessionId);
-    if (session.activeRun) throw new DomainError('run_active', '请先结束当前运行再更换项目。');
+    if (session.activeRun)
+      throw new DomainError('run_active', phrase('service:session.projectRunActive'));
+    this.register(device, projectPath);
     if (session.projectPath === projectPath && session.device?.id === device.id) return session;
     session.projectPath = projectPath;
     session.device = device;
@@ -734,7 +833,8 @@ export class SessionStore {
     return session;
   }
   // Points a project of a computer at another directory there. Its sessions move with it, and so does the
-  // directory Claude Code works in for it, unless the other directory has one already.
+  // directory Claude Code works in for it, unless the other directory has one already. A directory that is a
+  // project already takes the moved one in, keeping its own name if it has one.
   moveProject(from: string, to: string, device: Device) {
     const members = this.list().filter(
       (session) =>
@@ -743,12 +843,29 @@ export class SessionStore {
         (session.device ? session.device.id === device.id : platformOf(device) === 'win32'),
     );
     if (members.some((session) => session.activeRun))
-      throw new DomainError('run_active', '这个项目里有会话正在运行，结束后再更改文件夹。');
+      throw new DomainError('run_active', phrase('service:project.moveRunActive'));
     this.database
       .prepare(
         'UPDATE OR IGNORE native_roots SET path_key = ? WHERE device_id = ? AND path_key = ?',
       )
       .run(pathKey(to), device.id, pathKey(from));
+    // The project's row moves where it is, and so keeps its place among projects made in the same moment. Into a
+    // folder that is a project already, it joins that one, which takes its name if it has none.
+    if (pathKey(to) !== pathKey(from) && this.isProject(device.id, to)) {
+      this.database
+        .prepare(
+          `UPDATE projects SET name = COALESCE(name,
+            (SELECT name FROM projects WHERE device_id = ? AND path_key = ?)) WHERE device_id = ? AND path_key = ?`,
+        )
+        .run(device.id, pathKey(from), device.id, pathKey(to));
+      this.database
+        .prepare('DELETE FROM projects WHERE device_id = ? AND path_key = ?')
+        .run(device.id, pathKey(from));
+    } else
+      this.database
+        .prepare('UPDATE projects SET path_key = ?, path = ? WHERE device_id = ? AND path_key = ?')
+        .run(pathKey(to), to, device.id, pathKey(from));
+    this.register(device, to);
     return members.map((session) => this.move(session.id, to, device));
   }
   // The directory Claude Code works in for a directory of a computer: one for each project, shared by its
@@ -763,11 +880,13 @@ export class SessionStore {
       .get(device.id, key)!;
     return String(row.root);
   }
-  // A session from before computers were told apart becomes that of the first one to use it, where it is.
+  // A session from before computers were told apart becomes that of the first one to use it, where it is, its
+  // folder a project there as it would have been made one had the session had a computer (see `seedProjects`).
   claim(sessionId: string, device: Device) {
     const { session } = this.get(sessionId);
     if (session.device) return session;
     session.device = device;
+    if (!plainFolder.test(session.projectPath)) this.register(device, session.projectPath);
     if (session.prompt) {
       session.prompt.device ??= device.id;
       if (session.prompt.told) session.prompt.told.device ??= device.id;
@@ -775,8 +894,11 @@ export class SessionStore {
     this.save(session);
     return session;
   }
-  // A computer goes by the name it last signed in with, in every session that is on it.
+  // A computer goes by the name it last signed in with, in every session that is on it and in its projects.
   named(device: Device) {
+    this.database
+      .prepare('UPDATE projects SET device = ? WHERE device_id = ?')
+      .run(JSON.stringify(device), device.id);
     const changed: Session[] = [];
     for (const session of this.list())
       if (session.device?.id === device.id && session.device.name !== device.name) {
@@ -824,8 +946,9 @@ export class SessionStore {
   }
   // The text that tells Claude what its system prompt no longer has right, to go in front of the user's next
   // message: a project directory or a computer other than the one it knows, from the prompt or from an earlier
-  // notice, or other shells, or another one the user prefers. It is given out once.
-  notice(sessionId: string) {
+  // notice, or other shells, or another one the user prefers. It is given out once. `server` is the device ID of
+  // the sessions the service itself owns, whose project is on this server.
+  notice(sessionId: string, server: string) {
     const { session } = this.get(sessionId);
     const said = session.prompt;
     if (!said || said.compacted) return '';
@@ -834,9 +957,11 @@ export class SessionStore {
     const device = session.device?.id;
     const platform = platformOf(session.device);
     const execution = this.execution(device, platform);
-    // A notice from before shells were named in one is told again.
+    const here = device === server;
+    const wasHere = known.device === server;
+    // A notice from before shells were named in one is told again. The server has no shells to tell of.
     const sameShells = !!known.shells && known.shells.join() === execution.shells.join();
-    const samePreference = sameShells && known.shell === execution.shell;
+    const samePreference = here || (sameShells && known.shell === execution.shell);
     if (known.projectPath === session.projectPath && known.device === device && samePreference)
       return '';
     said.told = {
@@ -847,13 +972,19 @@ export class SessionStore {
       ...(execution.shell ? { shell: execution.shell } : {}),
     };
     this.save(session);
+    const paths = `The project directory is now ${JSON.stringify(session.projectPath)} (it was ${JSON.stringify(known.projectPath)}).`;
+    if (here)
+      return wasHere
+        ? `[CC Desk Tunnel: the user moved this session to another project on this server. ${paths} From now on use the new directory as the project directory, in place of the one given earlier.]\n\n`
+        : `[CC Desk Tunnel: the user moved this session to a project on this server. ${paths} From now on work on it here with your own tools: this session has no computer of its own, so device names none. What the earlier computer had is not here unless you find it here.]\n\n`;
+    if (wasHere)
+      return `[CC Desk Tunnel: the user moved this session to a project on one of their computers, ${JSON.stringify(session.device!.name)}, which is from now on this session's own computer, the device. ${paths} From now on: ${deviceSection(session.projectPath, execution).join(' ')}]\n\n`;
     const terms = deviceTerms(execution, session.projectPath);
     // The prompt's account of scripts and command lines holds for one system, its shells and the one preferred.
     const scripts =
       (known.platform ?? 'win32') === platform && samePreference
         ? ''
         : ` This replaces what was said of scripts and command lines: ${terms.script} ${terms.command}`;
-    const paths = `The project directory is now ${JSON.stringify(session.projectPath)} (it was ${JSON.stringify(known.projectPath)}).`;
     if (known.device !== device)
       return `[CC Desk Tunnel: the user now continues this session from another of their computers, ${JSON.stringify(session.device!.name)}. From now on the device is that computer: ${terms.name}. ${paths} What the earlier computer had, its files, paths and running processes, is not on this one unless you find it there.${scripts}]\n\n`;
     if (known.projectPath !== session.projectPath)
@@ -902,7 +1033,8 @@ export class SessionStore {
   }
   rename(sessionId: string, title: string) {
     const { session } = this.get(sessionId);
-    if (session.activeRun) throw new DomainError('run_active', '请先结束当前运行再改名。');
+    if (session.activeRun)
+      throw new DomainError('run_active', phrase('service:session.renameRunActive'));
     session.title = title;
     session.autoTitle = false;
     session.updatedAt = new Date().toISOString();

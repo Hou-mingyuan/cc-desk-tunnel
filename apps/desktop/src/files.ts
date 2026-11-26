@@ -1,6 +1,8 @@
 import { platformOf } from '@cc-desk-tunnel/protocol';
-import type { Device, Session } from '@cc-desk-tunnel/protocol';
+import type { Device, Project, Session } from '@cc-desk-tunnel/protocol';
 import type { ConnectedDevice } from './client.ts';
+import type { T } from './i18n.ts';
+import { projectName } from './paths.ts';
 
 // What the file panel shows and where (see FilePanel.tsx): an entry of a directory as the desktop's main process
 // lists it (electron/files.mjs), and the places it can look, each with the path style its paths are written in.
@@ -85,16 +87,24 @@ export const sftpPath = (path: string, platform: string) =>
 // The places the panel can look from this window: this computer, the service where it offers its files, and the
 // user's other computers that are connected and reachable.
 export function filePlaces(
+  t: T,
   here: Device | null,
   devices: ConnectedDevice[],
   files: FilesInfo | null,
 ): FilePlace[] {
   const local = platformOf(here) === 'win32' ? 'windows' : 'posix';
   return [
-    { id: 'local', label: '本机', kind: 'local', style: local },
+    { id: 'local', label: t('files:place.local'), kind: 'local', style: local },
     // Shown without an SFTP server too, where the panel says what the service lacks.
     ...(files
-      ? [{ id: 'server', label: '服务端', kind: 'server' as const, style: 'posix' as const }]
+      ? [
+          {
+            id: 'server',
+            label: t('common:device.server'),
+            kind: 'server' as const,
+            style: 'posix' as const,
+          },
+        ]
       : []),
     // Other computers are reached through the service, which offers files at all only with `files`.
     ...devices
@@ -125,6 +135,20 @@ export function sessionFolder(
   if (place.kind === 'local') return onThis ? session.projectPath : null;
   if (session.device?.id !== place.id) return null;
   return sftpPath(session.projectPath, platformOf(session.device));
+}
+
+// The service names a directory Claude Code works in by an ID, `native/<root>`, and the CLI keeps what it knows of
+// it under `~/.claude/projects/` by its path, `…-native-<root>`. What one is for, the project or the session it
+// works for, goes beside the name, which stays as it is.
+export function nativeLabels(projects: Project[], sessions: Session[]) {
+  const labels = new Map<string, string>();
+  for (const session of sessions) labels.set(session.nativeRoot ?? session.id, session.title);
+  for (const project of projects)
+    labels.set(project.root, `${projectName(project)} · ${project.device.name}`);
+  return (name: string) => {
+    const root = /(?:^|native-)([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})$/i.exec(name)?.[1];
+    return root ? labels.get(root.toLowerCase()) : undefined;
+  };
 }
 
 export function formatSize(bytes: number) {

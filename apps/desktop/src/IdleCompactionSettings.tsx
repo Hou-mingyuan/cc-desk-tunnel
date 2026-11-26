@@ -1,12 +1,15 @@
 import { useEffect, useState } from 'react';
 import type { IdleCompaction } from '@cc-desk-tunnel/protocol';
+import { useT } from './i18n.ts';
 import type { ProxyClient } from './client.ts';
-import { idleCompactionFields as fields } from './setting-fields.ts';
-import { Row, Switch } from './ui.tsx';
+import { idleCompactionFields } from './setting-fields.ts';
+import { Row, SettingText, SettingsHeading, Switch } from './ui.tsx';
 
 // The service's own setting, kept with its sessions and not in the CLI's file: before an idle session's one-hour prompt
 // cache lapses, the service compacts it as the compact button does. Each change is saved at once.
 export default function IdleCompactionSettings({ client }: { client: ProxyClient }) {
+  const t = useT();
+  const fields = idleCompactionFields(t);
   const [values, setValues] = useState<IdleCompaction | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -26,19 +29,15 @@ export default function IdleCompactionSettings({ client }: { client: ProxyClient
     try {
       setValues((await client.fetch({ type: 'compaction.update', values: change })).values);
     } catch (error) {
-      setFailure(error instanceof Error ? error.message : '保存失败。');
+      setFailure(error instanceof Error ? error.message : t('settings:saveFailed'));
     } finally {
       setSaving(false);
     }
   }
   return (
     <>
-      <h2 className="page-heading">缓存过期前自动压缩</h2>
-      <p className="muted page-section-note">
-        提示缓存在最后一次请求后 1
-        小时过期，过期后压缩要按全价重读整段上下文。开启后，会话空闲到设定时间时，服务端用当前模型执行
-        /compact，与手动点“压缩”相同，读取的是缓存；不需要客户端或会话所在电脑在线。这是一次真实请求，会计入额度；已知额度用完时不压缩。关闭时，会话里会在过期前提醒。
-      </p>
+      <SettingsHeading help="context#idle">{t('settings:idle.heading')}</SettingsHeading>
+      <p className="muted page-section-note">{t('settings:idle.intro')}</p>
       {failure && (
         <p className="error-text" role="alert">
           {failure}
@@ -55,10 +54,7 @@ export default function IdleCompactionSettings({ client }: { client: ProxyClient
             />
           </Row>
           <label>
-            <span>
-              <strong>{fields.afterMinutes.title}</strong>
-              <small>{fields.afterMinutes.detail}</small>
-            </span>
+            <SettingText title={fields.afterMinutes.title} detail={fields.afterMinutes.detail} />
             <select
               aria-label={fields.afterMinutes.title}
               disabled={saving}
@@ -69,16 +65,13 @@ export default function IdleCompactionSettings({ client }: { client: ProxyClient
                 .sort((a, b) => a - b)
                 .map((value) => (
                   <option key={value} value={value}>
-                    {value} 分钟
+                    {t('settings:idle.minutes', { count: value })}
                   </option>
                 ))}
             </select>
           </label>
           <label>
-            <span>
-              <strong>{fields.minTokens.title}</strong>
-              <small>{fields.minTokens.detail}</small>
-            </span>
+            <SettingText title={fields.minTokens.title} detail={fields.minTokens.detail} />
             <select
               aria-label={fields.minTokens.title}
               disabled={saving}

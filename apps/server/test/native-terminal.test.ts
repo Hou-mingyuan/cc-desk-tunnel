@@ -12,6 +12,7 @@ import { nativeContext } from '../src/claude.ts';
 import { SessionStore } from '../src/store.ts';
 import { NativeLogin, parseAccountStatus } from '../src/native-account.ts';
 import { loginExpiryWarnings } from '../src/login-expiry.ts';
+import { textOf } from '../src/errors.ts';
 import type { TerminalSpawner } from '../src/native-terminal.ts';
 import type { Session, TerminalActivity } from '@cc-desk-tunnel/protocol';
 import { randomUUID } from 'node:crypto';
@@ -174,11 +175,21 @@ test('a terminal launches the official CLI directly with remote guidance and no 
       model: null,
       effort: 'high',
     } as Session,
-    { configPath: '/private/ssh.conf' },
     own,
   );
   assert.ok(args.includes('--append-system-prompt'));
   assert.ok(args.some((arg) => arg.includes('D:\\\\项目')));
+  // The help is readable without asking where the build put it.
+  assert.ok(!args.includes('--add-dir'));
+  const helped = terminalArguments(
+    { executable: '/native/claude', help: '/app/apps/server/help' },
+    { id: 's', projectPath: 'D:\\test', permissionMode: 'auto' } as Session,
+    own,
+  );
+  assert.deepEqual(helped.slice(helped.indexOf('--add-dir'), helped.indexOf('--add-dir') + 2), [
+    '--add-dir',
+    '/app/apps/server/help',
+  ]);
   assert.ok(args.some((arg) => arg.includes('ssh device-pwsh')));
   assert.ok(args.includes('provider'));
   assert.ok(args.includes('high'));
@@ -189,7 +200,6 @@ test('a terminal launches the official CLI directly with remote guidance and no 
     const launched = terminalArguments(
       { executable: 'claude' },
       { id: 's', projectPath: 'D:\\test', permissionMode } as Session,
-      { configPath: '/ssh' },
       own,
     );
     return launched[launched.indexOf('--permission-mode') + 1];
@@ -206,16 +216,15 @@ test('a terminal resumes its session or creates it under the session ID, with it
   } as Session;
   const options = { executable: 'claude', settingsPath: '/private/provider.json' };
   const execution = { platform: 'win32' as const, shells: ['pwsh' as const] };
-  const resumed = terminalArguments(
-    options,
-    session,
-    { configPath: '/ssh' },
-    { resume: true, settingsPath: '/t.json', execution },
-  );
+  const resumed = terminalArguments(options, session, {
+    resume: true,
+    settingsPath: '/t.json',
+    execution,
+  });
   assert.deepEqual(resumed.slice(0, 2), ['--resume', session.id]);
   assert.deepEqual(resumed.slice(-2), ['--settings', '/t.json']);
   assert.ok(!resumed.includes('/private/provider.json'));
-  const created = terminalArguments(options, session, undefined, {
+  const created = terminalArguments(options, session, {
     resume: false,
     settingsPath: '/t.json',
     execution,
@@ -390,9 +399,17 @@ test('a sign-in about to end is told in the conversation once a day, from ten da
   const now = Date.parse('2026-11-10T08:00:00Z');
   assert.equal(warn('2026-12-01T00:00:00Z', now), null);
   assert.equal(warn(undefined, now), null);
-  assert.match(warn('2026-11-15T00:00:00Z', now) ?? '', /约 5 天后到期（2026-11-15）/);
+  const soon = warn('2026-11-15T00:00:00Z', now);
+  assert.equal(
+    soon && textOf(soon),
+    'Claude Code 的登录约 5 天后到期（2026-11-15），到期后要在“账号与额度”里重新登录。',
+  );
   assert.equal(warn('2026-11-15T00:00:00Z', now + 3_600_000), null, 'once a day');
-  assert.match(warn('2026-11-09T00:00:00Z', now + 86_400_000) ?? '', /可能已经到期/);
+  const ended = warn('2026-11-09T00:00:00Z', now + 86_400_000);
+  assert.equal(
+    ended && textOf(ended),
+    'Claude Code 的登录可能已经到期（2026-11-09）；如果请求开始失败，请在“账号与额度”里重新登录。',
+  );
 });
 
 // A long terminal fills the page of history a client opens the session with, leaving out what a chat run said of

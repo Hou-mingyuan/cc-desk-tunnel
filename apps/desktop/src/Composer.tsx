@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { isWindowsPath } from '@cc-desk-tunnel/protocol';
 import type {
+  AccountQuota,
   Effort,
   NativeCapabilities,
   NativeMetrics,
@@ -20,6 +21,7 @@ import type {
   PermissionMode,
   Session,
 } from '@cc-desk-tunnel/protocol';
+import { useT } from './i18n.ts';
 import { slashCommands } from './commands.ts';
 import ComposerControls from './ComposerControls.tsx';
 import MessageInput, { messageLimit } from './MessageInput.tsx';
@@ -76,6 +78,7 @@ export default function Composer({
   capabilities,
   nativeSession,
   metrics,
+  quota,
   openAccount,
   send,
   resume,
@@ -107,6 +110,7 @@ export default function Composer({
   capabilities: NativeCapabilities | null;
   nativeSession: NativeSession | null;
   metrics: NativeMetrics | null;
+  quota: AccountQuota | null;
   openAccount: () => void;
   // Sends the draft, or the text given instead of it.
   send: (text?: string) => void;
@@ -121,6 +125,7 @@ export default function Composer({
   }) => Promise<void>;
   stop: () => void;
 }) {
+  const t = useT();
   const input = useRef<MessageInputHandle>(null);
   const tooLong = draft.length > messageLimit;
   const toolbar = useRef<HTMLDivElement>(null);
@@ -165,8 +170,10 @@ export default function Composer({
           {
             key: 'compact',
             icon: <Shrink />,
-            title: '压缩上下文',
-            detail: metrics?.context ? `已使用 ${metrics.context.percentage}%` : '/compact',
+            title: t('session:composer.compact'),
+            detail: metrics?.context
+              ? t('session:composer.contextUsed', { percent: metrics.context.percentage })
+              : '/compact',
             disabled: controlsDisabled || !canCompact,
             run: compact,
           },
@@ -177,8 +184,8 @@ export default function Composer({
           {
             key: 'refresh',
             icon: <RefreshCw />,
-            title: '刷新原生状态',
-            detail: '上下文与订阅额度',
+            title: t('session:composer.refresh'),
+            detail: t('session:composer.refreshDetail'),
             disabled: controlsDisabled || refreshing,
             run: () => {
               setSlashOpen(false);
@@ -188,7 +195,7 @@ export default function Composer({
           },
         ]
       : []),
-    ...(slashOpen ? slashCommands(capabilities, typed) : []).map((command) => ({
+    ...(slashOpen ? slashCommands(t, capabilities, typed) : []).map((command) => ({
       key: `/${command.name}`,
       icon: <SquareSlash />,
       title: (
@@ -248,7 +255,12 @@ export default function Composer({
   return (
     <div className="composer-area">
       {menuShown && (
-        <div className="slash-menu" role="listbox" aria-label="会话命令" ref={menu}>
+        <div
+          className="slash-menu"
+          role="listbox"
+          aria-label={t('session:composer.commands')}
+          ref={menu}
+        >
           {items.map((item, index) => (
             <button
               key={item.key}
@@ -274,7 +286,7 @@ export default function Composer({
         <button
           type="button"
           className="chip quiet"
-          aria-label="会话所在的项目"
+          aria-label={t('session:composer.project')}
           aria-haspopup="menu"
           title={session.projectPath}
           disabled={!chooseProject}
@@ -284,10 +296,10 @@ export default function Composer({
           }}
         >
           <Folder />
-          <span>{projectName ?? '普通会话'}</span>
+          <span>{projectName ?? t('session:composer.plain')}</span>
         </button>
         {branch && (
-          <span className="chip quiet" title="项目当前所在的 git 分支">
+          <span className="chip quiet" title={t('session:composer.branch')}>
             <GitBranch />
             <span>{branch}</span>
           </span>
@@ -318,8 +330,8 @@ export default function Composer({
           windows={isWindowsPath(session.projectPath)}
           placeholder={
             session.activeRun?.surface === 'terminal'
-              ? '会话在终端中打开，关闭终端后可以在这里接着聊'
-              : '随心输入…'
+              ? t('session:composer.inTerminal')
+              : t('session:composer.placeholder')
           }
           value={draft}
           disabled={inputDisabled}
@@ -370,7 +382,7 @@ export default function Composer({
         <div className="composer-toolbar" ref={toolbar}>
           {window.desktop && (
             <IconButton
-              title="添加文件：把文件的路径放进消息"
+              title={t('session:composer.addFiles')}
               className="attach-button"
               disabled={inputDisabled}
               onClick={() => void window.desktop!.chooseFiles().then(attach)}
@@ -380,18 +392,18 @@ export default function Composer({
           )}
           {!native ? (
             <label className="scenario-label">
-              场景
+              {t('session:simulation.scenario')}
               <select
-                aria-label="模拟场景"
+                aria-label={t('session:simulation.label')}
                 value={scenario}
                 onChange={(event) => setScenario(event.target.value as Scenario)}
                 disabled={!!session.activeRun || busy}
               >
-                <option value="chat">对话</option>
-                <option value="tool">工具审批</option>
-                <option value="question">提问</option>
-                <option value="plan">计划</option>
-                <option value="error">上游错误</option>
+                <option value="chat">{t('session:simulation.chat')}</option>
+                <option value="tool">{t('session:simulation.approval')}</option>
+                <option value="question">{t('session:simulation.question')}</option>
+                <option value="plan">{t('session:simulation.plan')}</option>
+                <option value="error">{t('session:simulation.upstreamError')}</option>
               </select>
             </label>
           ) : (
@@ -410,6 +422,7 @@ export default function Composer({
               capabilities={capabilities}
               nativeSession={nativeSession}
               metrics={metrics}
+              quota={quota}
               openAccount={openAccount}
               disabled={controlsDisabled}
               configure={configure}
@@ -422,7 +435,7 @@ export default function Composer({
             session.activeRun.waiting !== 'background' &&
             session.activeRun.surface !== 'terminal' && (
               <IconButton
-                title="停止运行"
+                title={t('session:composer.stop')}
                 className="stop-button"
                 disabled={!connected || !ownsRun || busy}
                 onClick={stop}
@@ -431,7 +444,11 @@ export default function Composer({
               </IconButton>
             )}
           {resume && !draft.trim() ? (
-            <IconButton title="接着上一轮继续" className="send-button" onClick={resume}>
+            <IconButton
+              title={t('session:composer.continue')}
+              className="send-button"
+              onClick={resume}
+            >
               <Play />
             </IconButton>
           ) : (
@@ -439,8 +456,12 @@ export default function Composer({
               <button
                 type="submit"
                 className="icon-button send-button"
-                aria-label="发送消息"
-                title={tooLong ? `消息超过 ${messageLimit} 字，删减后再发送` : '发送消息'}
+                aria-label={t('session:composer.send')}
+                title={
+                  tooLong
+                    ? t('session:composer.tooLong', { limit: messageLimit })
+                    : t('session:composer.send')
+                }
                 disabled={!draft.trim() || tooLong || inputDisabled}
               >
                 <ArrowUp />

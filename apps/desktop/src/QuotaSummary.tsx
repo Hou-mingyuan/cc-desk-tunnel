@@ -1,27 +1,34 @@
 import { ChevronRight } from 'lucide-react';
-import type { NativeMetrics } from '@cc-desk-tunnel/protocol';
+import type { AccountQuota } from '@cc-desk-tunnel/protocol';
+import { useT } from './i18n.ts';
 import { quotaFigures } from './quota.ts';
 import './quota-summary.css';
 
 const tone = (used: number) => (used >= 90 ? 'danger' : used >= 70 ? 'warn' : '');
 export function QuotaSummary({
-  metrics,
+  quota,
   connected,
-  emptyMessage = '暂未获取额度',
+  emptyMessage,
   onOpen,
 }: {
-  metrics: NativeMetrics | null;
+  quota: AccountQuota | null;
   connected: boolean;
   emptyMessage?: string;
   onOpen: () => void;
 }) {
-  const figures = quotaFigures(metrics?.rateLimits);
-  const unavailable = metrics?.rateLimits?.available === false;
+  const t = useT();
+  const figures = quotaFigures(t, quota?.rateLimits);
+  const unavailable = quota?.rateLimits?.available === false;
   return (
     <div className="sidebar-quota">
-      <button type="button" className="quota-summary" aria-label="查看订阅用量" onClick={onOpen}>
+      <button
+        type="button"
+        className="quota-summary"
+        aria-label={t('account:quota.openUsage')}
+        onClick={onOpen}
+      >
         <span className="quota-summary-heading">
-          额度已用
+          {t('account:quota.used')}
           <ChevronRight aria-hidden="true" />
         </span>
         <span className="quota-summary-values">
@@ -33,11 +40,11 @@ export function QuotaSummary({
                 </span>
               ))
             : unavailable
-              ? '未提供订阅额度'
-              : emptyMessage}
+              ? t('account:quota.unavailable')
+              : (emptyMessage ?? t('account:quota.none'))}
         </span>
         {!connected && figures.length > 0 && (
-          <span className="quota-summary-offline">已断线 · 最近读数</span>
+          <span className="quota-summary-offline">{t('account:quota.stale')}</span>
         )}
       </button>
     </div>

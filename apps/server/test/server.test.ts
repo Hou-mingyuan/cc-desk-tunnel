@@ -1,17 +1,21 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer as createHttpServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import { WebSocket } from 'ws';
 import { PROTOCOL_VERSION, serverMessageSchema } from '@cc-desk-tunnel/protocol';
-import type { ServerMessage, Session, SessionEvent } from '@cc-desk-tunnel/protocol';
+import type { Project, ServerMessage, Session, SessionEvent } from '@cc-desk-tunnel/protocol';
 import { readIdleCompaction } from '../src/idle-compaction.ts';
+import { quotas } from '../src/claude.ts';
 import { createProxyServer, upgradeHeld } from '../src/server.ts';
 import { SessionStore } from '../src/store.ts';
 import { serviceVersion } from '../src/updates.ts';
+import { textOf } from '../src/errors.ts';
 
 const token = 'offline-test-' + randomUUID();
 // One computer unless a test is about several.
@@ -426,7 +430,10 @@ test('a computer that stays away longer than the grace has its run stopped; one 
   assert.equal(after.session.activeRun, null);
   const stop = after.events.findLast((event) => event.payload.type === 'run.status')?.payload;
   assert.ok(stop?.type === 'run.status' && stop.status === 'cancelled');
-  assert.match(stop.reason ?? '', /设备离线/);
+  assert.equal(
+    stop.reason && textOf(stop.reason),
+    '设备离线超过 0 秒，运行已停止；在途命令结果可能未知。',
+  );
 
   const patient = await fixture(t, 2, 60_000);
   const left = await cutOff(patient, true);
@@ -489,6 +496,7 @@ test('a session runs on its own computer whichever sends to it; another one take
   const forked = await away.request({
     type: 'session.fork',
     sessionId,
+    title: '分叉',
     projectPath: 'E:\\笔记本\\项目',
   });
   assert.ok(forked.type === 'response' && forked.ok && forked.sessionId);
@@ -982,7 +990,8 @@ test('forking copies a session whole or up to a message, and leaves the original
         event.payload.type === 'message.user' ? [event.payload.text] : [],
       );
   const original = f.server.store.get(sessionId).events.length;
-  const command = { type: 'session.fork', requestId: randomUUID(), sessionId };
+  // The client names the copy.
+  const command = { type: 'session.fork', requestId: randomUUID(), sessionId, title: '副本' };
   client.send(command);
   client.send(command);
   const copies = new Set<string>();
@@ -998,16 +1007,17 @@ test('forking copies a session whole or up to a message, and leaves the original
   assert.notEqual(whole, sessionId);
   assert.deepEqual(questions(whole!), texts);
   const copy = f.server.store.get(whole!);
-  assert.equal(copy.session.title, `${f.server.store.get(sessionId).session.title}（分叉）`);
+  assert.equal(copy.session.title, '副本');
   assert.equal(copy.session.projectPath, f.server.store.get(sessionId).session.projectPath);
   assert.ok(
     copy.events.every((event, index) => event.sessionId === whole && event.sequence === index + 1),
   );
-  const cut = await client.request({ type: 'session.fork', sessionId, beforeMessageId: ids[2] });
+  const fork = { type: 'session.fork', sessionId, title: '分叉' } as const;
+  const cut = await client.request({ ...fork, beforeMessageId: ids[2] });
   assert.ok(cut.type === 'response' && cut.ok && cut.sessionId);
   assert.deepEqual(questions(cut.sessionId), texts.slice(0, 2));
   assert.equal(f.server.store.get(cut.sessionId).session.activeRun, null);
-  const first = await client.request({ type: 'session.fork', sessionId, beforeMessageId: ids[0] });
+  const first = await client.request({ ...fork, beforeMessageId: ids[0] });
   assert.ok(first.type === 'response' && first.ok && first.sessionId);
   assert.equal(f.server.store.get(first.sessionId).events.length, 0);
   // The fork continues on its own.
@@ -1020,15 +1030,11 @@ test('forking copies a session whole or up to a message, and leaves the original
   await completed(cut.sessionId);
   assert.deepEqual(questions(cut.sessionId), [...texts.slice(0, 2), '另一条路']);
   assert.equal(f.server.store.get(sessionId).events.length, original);
-  const missing = await client.request({
-    type: 'session.fork',
-    sessionId,
-    beforeMessageId: randomUUID(),
-  });
+  const missing = await client.request({ ...fork, beforeMessageId: randomUUID() });
   assert.ok(missing.type === 'response' && !missing.ok && missing.code === 'not_found');
   await client.request({ type: 'message.send', sessionId, text: '等待审批', scenario: 'tool' });
   await client.event('approval.requested');
-  const busy = await client.request({ type: 'session.fork', sessionId });
+  const busy = await client.request(fork);
   assert.ok(busy.type === 'response' && !busy.ok && busy.code === 'run_active');
 });
 
@@ -1089,10 +1095,14 @@ test('restart marks pending native sends unconfirmed and never queues them again
 test('native titles update only automatic names; a user rename remains authoritative', async (t) => {
   const f = await fixture(t);
   const requestId = randomUUID();
-  const automatic = f.server.store.create(requestId, '新会话', 'D:\\项目', device);
+  const automatic = f.server.store.create(requestId, '新会话', 'D:\\项目', device, false, true);
   assert.equal(automatic.autoTitle, true);
   f.server.store.renameNative(automatic.id, '原生标题');
-  assert.equal(f.server.store.create(requestId, '新会话', 'D:\\项目', device).id, automatic.id);
+  // A request sent again is the same one, though its placeholder may be another language's by then.
+  assert.equal(
+    f.server.store.create(requestId, 'New session', 'D:\\项目', device, false, true).id,
+    automatic.id,
+  );
   assert.throws(() => f.server.store.create(requestId, '不同请求', 'D:\\项目', device), {
     code: 'request_conflict',
   });
@@ -1234,14 +1244,102 @@ test('an upgrade is held back only by what is at work, and says what that is', (
     false,
     false,
   );
-  assert.match(held ?? '', /「在回答」「终端在跑」正在运行.*强行升级/);
-  assert.doesNotMatch(held ?? '', /终端开着|等后台任务/);
-  const many = Array.from({ length: 5 }, (_, index) => session(`会话${index}`, run));
-  assert.match(
-    upgradeHeld(many, false, false) ?? '',
-    /「会话0」「会话1」「会话2」 等 5 个会话正在运行/,
+  const text = (words: ReturnType<typeof upgradeHeld>) => (words ? textOf(words) : '');
+  assert.equal(
+    text(held),
+    '「在回答」「终端在跑」正在运行。升级会重启服务端并中断它们：等结束后再升级，或选择强行升级。',
   );
-  assert.match(upgradeHeld([], true, true) ?? '', /有会话正在移动或修改，Claude 账号正在登录/);
+  const many = Array.from({ length: 5 }, (_, index) => session(`会话${index}`, run));
+  assert.equal(
+    text(upgradeHeld(many, false, false)),
+    '「会话0」「会话1」「会话2」 等 5 个会话正在运行。升级会重启服务端并中断它们：等结束后再升级，或选择强行升级。',
+  );
+  assert.equal(
+    text(upgradeHeld([], true, true)),
+    '有会话正在移动或修改，Claude 账号正在登录。升级会重启服务端并中断它们：等结束后再升级，或选择强行升级。',
+  );
+});
+
+test('the projects are kept by the service, told to every window, and named or removed from any', async (t) => {
+  const f = await fixture(t);
+  const laptop = { id: randomUUID(), name: '笔记本' };
+  const desk = await f.connect();
+  let away = await f.connect(laptop);
+  const told = async (client: Client, check: (list: Project[]) => boolean) => {
+    const message = await client.wait((item) => item.type === 'projects' && check(item.projects));
+    assert.ok(message.type === 'projects');
+    return message.projects;
+  };
+  // Added on the laptop, as the laptop's, and every window is told; adding it again changes nothing.
+  for (let time = 0; time < 2; time++) {
+    const added = await away.request({ type: 'project.add', path: 'E:\\笔记本\\项目' });
+    assert.ok(added.type === 'response' && added.ok);
+  }
+  const list = await told(desk, (projects) => projects.length === 1);
+  assert.deepEqual(
+    list.map(({ device, path, name }) => [device, path, name]),
+    [[laptop, 'E:\\笔记本\\项目', undefined]],
+  );
+  // Its sessions work in the directory it names on the service.
+  const made = await away.request({
+    type: 'session.create',
+    title: '在笔记本上',
+    projectPath: 'e:/笔记本/项目',
+  });
+  assert.ok(made.type === 'response' && made.sessionId);
+  assert.equal(f.server.store.get(made.sessionId).session.nativeRoot, list[0].root);
+  // Named from the desk, and an empty name gives it back the folder's.
+  const renamed = await desk.request({
+    type: 'project.rename',
+    deviceId: laptop.id,
+    path: 'e:\\笔记本\\项目',
+    name: '笔记',
+  });
+  assert.ok(renamed.type === 'response' && renamed.ok);
+  await told(away, (projects) => projects[0]?.name === '笔记');
+  await desk.request({
+    type: 'project.rename',
+    deviceId: laptop.id,
+    path: 'E:\\笔记本\\项目',
+    name: '',
+  });
+  await told(away, (projects) => projects.length === 1 && !projects[0].name);
+  // A computer that signs in under another name has its projects follow; one that is gone still has them, and a
+  // window that signs in is told them.
+  away.send({ type: 'leave' });
+  away.socket.terminate();
+  away = await f.connect({ ...laptop, name: '新笔记本' });
+  await told(desk, (projects) => projects[0]?.device.name === '新笔记本');
+  away.send({ type: 'leave' });
+  away.socket.terminate();
+  const late = new Client(f.url);
+  f.clients.push(late);
+  const ready = await late.open();
+  assert.ok(ready.type === 'ready');
+  assert.deepEqual(
+    ready.projects.map(({ device, path }) => [device.name, path]),
+    [['新笔记本', 'E:\\笔记本\\项目']],
+  );
+  // Removed from the desk while the laptop is away: its session stays where it is, a plain one now.
+  const removed = await desk.request({
+    type: 'project.remove',
+    deviceId: laptop.id,
+    path: 'E:\\笔记本\\项目',
+  });
+  assert.ok(removed.type === 'response' && removed.ok);
+  await told(desk, (projects) => projects.length === 0);
+  assert.equal(f.server.store.get(made.sessionId).session.projectPath, 'e:/笔记本/项目');
+  const missing = await desk.request({
+    type: 'project.remove',
+    deviceId: laptop.id,
+    path: 'E:\\笔记本\\项目',
+  });
+  assert.ok(missing.type === 'response' && !missing.ok && missing.code === 'not_found');
+  // Made a project again, it has the directory it had, and with it what Claude Code kept there.
+  away = await f.connect(laptop);
+  await away.request({ type: 'project.add', path: 'E:\\笔记本\\项目', name: '回来了' });
+  const back = await told(desk, (projects) => projects[0]?.name === '回来了');
+  assert.deepEqual([back.length, back[0].root], [1, list[0].root]);
 });
 
 test('a session is started on or moved to a project of another connected computer, and nowhere else', async (t) => {
@@ -1249,21 +1347,8 @@ test('a session is started on or moved to a project of another connected compute
   const laptop = { id: randomUUID(), name: '笔记本' };
   const desk = await f.connect();
   const away = await f.connect(laptop);
-  // The laptop says its projects, and every window is told them with the computer.
-  const said = await away.request({
-    type: 'device.projects',
-    projects: ['E:\\笔记本\\项目', 'E:\\笔记本\\项目'],
-  });
+  const said = await away.request({ type: 'project.add', path: 'E:\\笔记本\\项目' });
   assert.ok(said.type === 'response' && said.ok);
-  const told = await desk.wait(
-    (message) =>
-      message.type === 'devices' &&
-      message.devices.some((item) => item.id === laptop.id && item.projects?.length),
-  );
-  assert.ok(told.type === 'devices');
-  assert.deepEqual(told.devices.find((item) => item.id === laptop.id)!.projects, [
-    'E:\\笔记本\\项目',
-  ]);
   // Started from the desk, the session is the laptop's.
   const made = await desk.request({
     type: 'session.create',
@@ -1274,7 +1359,7 @@ test('a session is started on or moved to a project of another connected compute
   assert.ok(made.type === 'response' && made.ok && made.sessionId);
   const there = f.server.store.get(made.sessionId).session;
   assert.deepEqual([there.device, there.projectPath], [laptop, 'e:\\笔记本\\项目']);
-  // Not in a folder it did not say.
+  // Not in a folder that is no project there.
   const unknown = await desk.request({
     type: 'session.create',
     title: '别处',
@@ -1309,4 +1394,80 @@ test('a session is started on or moved to a project of another connected compute
     deviceId: laptop.id,
   });
   assert.ok(gone.type === 'response' && !gone.ok && gone.code === 'device_offline');
+});
+
+test('the quota is the account’s: a new connection is handed what the service holds, and every connection hears each change', async (t) => {
+  const f = await fixture(t);
+  quotas.clear();
+  t.after(() => quotas.clear());
+  const first = await f.connect();
+  const resetsAt = new Date(Date.now() + 3600_000).toISOString();
+  const used = (message: ServerMessage) =>
+    message.type === 'quota' ? message.rateLimits?.windows[0]?.utilization : undefined;
+  quotas.observeTerminal([{ name: 'five_hour', utilization: 12, resetsAt }]);
+  assert.equal(used(await first.wait((message) => message.type === 'quota')), 12);
+  const late = new Client(f.url, undefined, { id: randomUUID(), name: '另一台' });
+  f.clients.push(late);
+  const ready = await late.open();
+  assert.ok(ready.type === 'ready');
+  assert.equal(ready.quota?.rateLimits?.windows[0]?.utilization, 12);
+  quotas.observeTerminal([{ name: 'five_hour', utilization: 13, resetsAt }]);
+  for (const client of [first, late])
+    assert.equal(used(await client.wait((message) => message.type === 'quota')), 13);
+});
+
+test('clients connected before the installer for clients has arrived are told of it once it has', async (t) => {
+  const version = serviceVersion();
+  const name = `CC-Desk-Tunnel-Setup-${version}-x64.exe`;
+  const installer = Buffer.alloc(5000, 7);
+  const sha256 = createHash('sha256').update(installer).digest('hex');
+  // The release page holds the installer back until the client has connected.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  const page = createHttpServer((request, response) => {
+    const base = `http://127.0.0.1:${(page.address() as AddressInfo).port}`;
+    if (request.url === `/repos/owner/name/releases/tags/v${version}`)
+      response.end(
+        JSON.stringify({
+          assets: [
+            { name: 'release.json', url: `${base}/assets/1` },
+            { name, url: `${base}/assets/2` },
+          ],
+        }),
+      );
+    else if (request.url === '/assets/1')
+      response.end(JSON.stringify({ version, files: [{ name, size: installer.length, sha256 }] }));
+    else if (request.url === '/assets/2') void held.then(() => response.end(installer));
+    else response.writeHead(404).end();
+  });
+  await new Promise<void>((resolve) => page.listen(0, '127.0.0.1', resolve));
+  const directory = mkdtempSync(join(tmpdir(), 'cc-desk-tunnel-test-'));
+  const server = createProxyServer({
+    token,
+    dataDir: directory,
+    updates: {
+      repository: 'owner/name',
+      api: `http://127.0.0.1:${(page.address() as AddressInfo).port}`,
+      restart: () => undefined,
+    },
+  });
+  const client = new Client(await server.listen(0));
+  t.after(async () => {
+    client.socket.terminate();
+    await server.close();
+    page.closeAllConnections();
+    page.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const ready = await client.open();
+  assert.ok(ready.type === 'ready' && ready.client === undefined);
+  release();
+  const told = await client.wait(
+    (message) => message.type === 'service.update' && !!message.client,
+  );
+  assert.deepEqual(told.type === 'service.update' && told.client, {
+    version,
+    size: installer.length,
+    sha256,
+  });
 });

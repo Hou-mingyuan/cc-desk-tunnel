@@ -10,11 +10,11 @@
 
 模型列表来自 CLI 初始化，桌面端不维护型号名单。CLI 按账号和提供方使用官方动态目录或内置目录；SDK 的 `supportedModels()` 返回初始化快照。空闲时“刷新模型列表”启动新的 CLI 读取状态。动态目录可带来新型号，内置目录和能力支持仍随 CLI 版本更新。
 
-代理有意变化限于外层：稳定 cwd / session ID、Windows SSH 提示词、用户选择的审批模式、可选的提供方 settings、公开增量输出、思考摘要显示（`--thinking-display summarized`）和官方持久化 / 恢复。不设置禁用遥测的变量，不默认限制任务轮数。自动更新关闭（`DISABLE_AUTOUPDATER=1`）：CLI 版本随服务端发布固定，交互式 CLI 不再在 ccdt 里提示更新、也不再自己执行 `npm install -g`。服务读完自身配置后即从进程环境删除 `PROXY_*` / `FRPS_*` 与四个服务专用的 `CLAUDE_*` 变量，原生 CLI、其 shell 与控制终端继承到的只有宿主环境本身（容器内为 `HOME`、`PATH` 等），不含代理 token 或部署配置；用户有意放进环境的其他变量原样保留。这只避免无意带出：CLI 与服务同属一个 Linux 用户，配置文件仍可被读取，不构成多用户隔离。对“内层完全不变”的工程解释是同一原生可执行与 agent 引擎，不是声称 headless / SDK 和终端 TTY 环境或未公开服务端判断逐项相同。
+代理有意变化限于外层：稳定 cwd / session ID、追加的会话提示词、用户选择的审批模式、可选的提供方 settings、公开增量输出、思考摘要显示（无界面运行不读 `showThinkingSummaries`，该项开启时代为传 `--thinking-display summarized`，未设置时与交互式 CLI 一样不显示）和官方持久化 / 恢复。不设置禁用遥测的变量，不默认限制任务轮数。自动更新关闭（`DISABLE_AUTOUPDATER=1`）：CLI 版本随服务端发布固定，交互式 CLI 不再在 ccdt 里提示更新、也不再自己执行 `npm install -g`。服务读完自身配置后即从进程环境删除 `PROXY_*` / `FRPS_*` 与四个服务专用的 `CLAUDE_*` 变量，原生 CLI、其 shell 与控制终端继承到的只有宿主环境本身（容器内为 `HOME`、`PATH` 等），不含代理 token 或部署配置；用户有意放进环境的其他变量原样保留。这只避免无意带出：CLI 与服务同属一个 Linux 用户，配置文件仍可被读取，不构成多用户隔离。对“内层完全不变”的工程解释是同一原生可执行与 agent 引擎，不是声称 headless / SDK 和终端 TTY 环境或未公开服务端判断逐项相同。
 
 后台任务（后台 Bash 命令、子代理）活在 CLI 进程里，任务结束时 CLI 自己开始下一轮。一轮结束时若还有后台任务，服务端不关闭 CLI：运行状态改为“等待后台任务”，界面把这一轮视为已完成，列出任务并可逐个结束，期间可以继续发消息。任务结束后 CLI 开始的那一轮照常显示；任务全部结束且没有新的一轮时运行结束。停止运行会结束 CLI，后台任务随之终止。任务列表取自 SDK 的 `background_tasks_changed` 消息，不计标记为 ambient 的任务；结束单个任务用 SDK 的 `stopTask`。
 
-`ccdt` 的终端另外用 node-pty 启动同一 CLI 交互式入口，不走 SDK、不设置 SDK 入口标记、不启动通用 shell。正常 flags / 私有提供方 env / Windows SSH 提示词属于外层配置；用户已有 settings.env 原样复用。键盘与画面经 WSS 接至用户自己的终端，不解释 OAuth 内容或存储终端日志。终端接着会话的原生会话（`--resume`，或以会话 ID 新建）。hooks 报告终端在做什么，也给出 CLI 记录的位置：服务端跟着读记录新写的行，分段记入会话；每一轮结束再经 SDK 完整读一遍，补上遗漏并发现回退。轮次结束时按状态行和本轮的 usage 记下上下文与缓存时长，供空闲提醒使用。
+`ccdt` 的终端另外用 node-pty 启动同一 CLI 交互式入口，不走 SDK、不设置 SDK 入口标记、不启动通用 shell。正常 flags / 私有提供方 env / 追加的会话提示词属于外层配置；用户已有 settings.env 原样复用。键盘与画面经 WSS 接至用户自己的终端，不解释 OAuth 内容或存储终端日志。终端接着会话的原生会话（`--resume`，或以会话 ID 新建）。hooks 报告终端在做什么，也给出 CLI 记录的位置：服务端跟着读记录新写的行，分段记入会话；每一轮结束再经 SDK 完整读一遍，补上遗漏并发现回退。轮次结束时按状态行和本轮的 usage 记下上下文与缓存时长，供空闲提醒使用。
 
 浏览器登录由服务端驱动官方 `claude auth login`，授权链接与回填代码经桌面端转交，原生凭据只由 CLI 自己读写；setup token 使用官方用户设置，见下节。状态由官方 `claude auth status` 读取。官方 `auth login` 不记下首次引导已完成（2.1.286 实测），交互式终端因此会让已登录账号重走主题与登录。
 
@@ -29,7 +29,7 @@
 会话可以改指另一个项目目录，也可以从使用者的另一台电脑接过去。系统提示词不在原生记录里，每次启动 CLI 时由 `systemPrompt.append` 给出，它一变，模型侧的提示缓存从它之后全部失效。为了不让更换项目和重连白白丢掉提示缓存，一个会话的系统提示词在压缩之前逐字不变：
 
 - 更换之后，系统提示词继续写原来的路径；变更由下一条用户消息前面的一段说明告诉 Claude（`[CC Desk Tunnel: the user moved this session …]`），界面只显示用户自己写的内容。
-- 换电脑同理：会话被另一台设备接过去之后，说明里写明换了电脑、那台电脑的名字和它上面的项目目录（`[CC Desk Tunnel: the user now continues this session from another of their computers …]`）。
+- 换电脑同理：会话被另一台设备接过去之后，说明里写明换了电脑、那台电脑的名字和它上面的项目目录（`[CC Desk Tunnel: the user now continues this session from another of their computers …]`）。会话在服务端的项目和电脑上的项目之间移动时，说明写明项目现在在哪里、怎样操作它（`[CC Desk Tunnel: the user moved this session to a project on this server …]`、`[… to a project on one of their computers …]`）。
 - 设备能用的 shell 变了（装上或卸掉 Git for Windows），或用户在“设置 → Shell”里改了偏好，也由下一条消息前的说明告诉 Claude，连同新的脚本写法（`[CC Desk Tunnel: the shells the device runs scripts in changed …]`、`[CC Desk Tunnel: the user now prefers …]`）。
 - 重连不需要说明：会话的 `ssh` 读会话固定的配置（见下文“存储”），不随连接变化；提示词里不写服务端或设备上任何程序和文件的位置，PowerShell、Git Bash 和定时任务文件由设备上的环境变量 `CC_DESK_TUNNEL_PWSH`、`CC_DESK_TUNNEL_BASH`、`CC_DESK_TUNNEL_SCHEDULES` 指明，客户端装在哪里都一样。
 - 系统提示词在缓存前缀本来就要失效的时刻跟上当前值：观察到压缩事件之后的下一轮。
@@ -44,6 +44,7 @@ Linux 工作目录（见下文“上下文的权威”）在会话有了原生�
 Claude Code 原生存储是模型会话上下文的唯一权威，包含原生消息链、工具结果、压缩记录与原生长期记忆。Linux 普通用户的原生配置目录由 CLI 决定（默认 `~/.claude/`）；本项目不解析和重写 JSONL，不在 Windows 自建上下文管理器，也不用 UI transcript 重新拼历史提示词。
 
 - 每个代理会话绑定同一个 native session ID。Linux cwd 按项目分配：一台设备上的一个项目目录对应 `PROXY_DATA_DIR/native/<root>/`，该项目的会话共用它，如同在本机项目目录里使用 Claude Code，原生的会话历史、自动记忆和项目级设置因此按项目共享。没有项目的普通会话各有自己的文件夹，也就各有一个目录。对应关系记在 `sessions.sqlite` 的 `native_roots` 表里，项目路径按 Windows 不区分大小写、两种分隔符等同的规则比较；会话记下自己的 `nativeRoot`。按项目分配之前建立的会话没有记下它，仍在 `native/<会话 ID>/`，照常恢复，不迁移。
+- 项目由服务端登记：`sessions.sqlite` 的 `projects` 表按设备和路径（与 `native_roots` 同一个键）记下用户的项目、显示名称和加入的先后，经 `ready` 与 `projects` 消息发给每个窗口，各台电脑、浏览器和 `ccdt` 看到的是同一份，离线电脑的项目也在其中。会话所在的设备和文件夹登记为项目，它就属于这个项目，否则是普通会话。在一个文件夹里新建（普通会话除外）、移入或分叉会话时，这个文件夹随之登记；“添加项目”只登记。移除项目只删登记：文件夹、其中的会话和 `native/<root>/` 都留着，会话从此是普通会话；重新添加后它们回到项目里，Claude Code 的记忆也还在。登记表第一次建立时取自已有会话所在的文件夹，桌面为普通会话建的 `<日期>\<时间>` 文件夹和服务端自己的 `native/` 除外；客户端以前在本机保存的项目列表和名称，由升级时已有的每个连接第一次连上时交给自己的服务。
 - 首轮 `sessionId`，后续 `resume`；显式 `persistSession: true`。即使每轮启动新 CLI 进程，原生上下文仍由同一 session 恢复。
 - 恢复前通过官方 `getSessionInfo` 检查原生记录存在；缺失则明确失败，不静默另开会话，不用代理事件假装恢复。
 - 运行结束通过官方接口确认记录已保存，并同步保存状态到 GUI。压缩由 CLI 执行，客户端只展示实际公开的压缩 / 状态事件。

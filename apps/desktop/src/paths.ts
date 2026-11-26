@@ -1,4 +1,6 @@
 import { isWindowsPath, pathKey } from '@cc-desk-tunnel/protocol';
+import { localeOf } from './i18n.ts';
+import type { T } from './i18n.ts';
 
 export { pathKey };
 export const folderName = (path: string) =>
@@ -6,7 +8,10 @@ export const folderName = (path: string) =>
     .split(isWindowsPath(path) ? /[\\/]/ : '/')
     .filter(Boolean)
     .at(-1) || path;
-// Whether a path lies under one of the folders that hold the sessions without a project.
+// What a project is called: the name the user gave it, or its folder's.
+export const projectName = (project: { name?: string; path: string }) =>
+  project.name || folderName(project.path);
+// Whether a path lies under one of the folders.
 export const isInside = (path: string, roots: string[]) =>
   roots.some((root) =>
     pathKey(path).startsWith(`${pathKey(root)}${isWindowsPath(root) ? '\\' : '/'}`),
@@ -19,13 +24,11 @@ export function isNewer(candidate: string, current: string) {
   return false;
 }
 // How long ago, in the fewest words that still tell recent from old.
-export function ago(time: number) {
+export function ago(t: T, time: number) {
   const minutes = Math.floor((Date.now() - time) / 60_000);
-  if (minutes < 1) return '刚刚';
-  if (minutes < 60) return `${minutes} 分钟`;
-  if (minutes < 60 * 24) return `${Math.floor(minutes / 60)} 小时`;
-  if (minutes < 60 * 24 * 30) return `${Math.floor(minutes / 60 / 24)} 天`;
-  return new Date(time).toLocaleDateString('zh-CN');
+  if (minutes < 1) return t('common:ago.now');
+  if (minutes < 60) return t('common:ago.minutes', { n: minutes });
+  if (minutes < 60 * 24) return t('common:ago.hours', { n: Math.floor(minutes / 60) });
+  if (minutes < 60 * 24 * 30) return t('common:ago.days', { n: Math.floor(minutes / 60 / 24) });
+  return new Date(time).toLocaleDateString(localeOf(t));
 }
-export const withProject = (projects: string[], path: string) =>
-  projects.some((item) => pathKey(item) === pathKey(path)) ? projects : [...projects, path];

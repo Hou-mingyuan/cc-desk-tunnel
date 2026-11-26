@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { terminalStatuses } from '@cc-desk-tunnel/protocol';
 import { Follow, catchUp, findSession } from './agent.mjs';
+import { t } from './i18n.mjs';
 
 // `ccdt acp`: Claude Code on the service as an agent of the Agent Client Protocol (agentclientprotocol.com), over
 // standard input and output, for the editors and agents that speak it (Zed, JetBrains, acpx…). It is a translation of
@@ -12,14 +13,72 @@ import { Follow, catchUp, findSession } from './agent.mjs';
 export const ACP_VERSION = 1;
 
 // The permission modes of a session, as an ACP client offers them to choose from.
-const MODES = [
-  { id: 'auto', name: '自动', description: '由 Claude Code 判断哪些操作需要询问' },
-  { id: 'default', name: '每次询问', description: '编辑和命令都先询问' },
-  { id: 'acceptEdits', name: '自动接受编辑', description: '编辑不再询问，命令仍询问' },
-  { id: 'plan', name: '计划', description: '先写计划，批准后再动手' },
-  { id: 'bypassPermissions', name: '绕过权限', description: '什么都不问（须先在客户端允许）' },
-];
-const modes = (current) => ({ currentModeId: current ?? 'auto', availableModes: MODES });
+const MODES = ['auto', 'default', 'acceptEdits', 'plan', 'bypassPermissions'];
+const modeList = () =>
+  MODES.map((id) => ({
+    id,
+    name: t(`cli:acp.mode.${id}.name`),
+    description: t(`cli:acp.mode.${id}.detail`),
+  }));
+const modes = (current) => ({ currentModeId: current ?? 'auto', availableModes: modeList() });
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const DEFAULT = 'default';
+
+// What a client offers to choose for a session (ACP's session config options), most used first: the model, how hard
+// it reasons, and the permission mode. `models` is the account's list as Claude Code last gave it, or empty while
+// none has been read; the model chosen is then the only one offered. The choices are the desktop client's.
+export function sessionOptions({ mode, model, effort }, models = []) {
+  const current =
+    models.find((row) => row.value === (model ?? DEFAULT)) ??
+    (model ? models.find((row) => row.resolvedModel === model) : undefined);
+  const rows = current
+    ? models
+    : [
+        { value: model ?? DEFAULT, displayName: model ?? t('cli:acp.default'), description: '' },
+        ...models,
+      ];
+  const levels = current?.supportedEffortLevels ?? [];
+  return [
+    {
+      id: 'model',
+      name: t('cli:acp.model'),
+      category: 'model',
+      type: 'select',
+      currentValue: current?.value ?? model ?? DEFAULT,
+      options: rows.map((row) => ({
+        value: row.value,
+        name: row.displayName,
+        ...(row.description ? { description: row.description } : {}),
+      })),
+    },
+    ...(levels.length
+      ? [
+          {
+            id: 'effort',
+            name: t('cli:acp.effort'),
+            category: 'thought_level',
+            type: 'select',
+            currentValue: effort && levels.includes(effort) ? effort : DEFAULT,
+            options: [
+              { value: DEFAULT, name: t('cli:acp.default') },
+              ...levels.map((level) => ({
+                value: level,
+                name: EFFORTS.includes(level) ? t(`cli:acp.level.${level}`) : level,
+              })),
+            ],
+          },
+        ]
+      : []),
+    {
+      id: 'mode',
+      name: t('cli:acp.mode.title'),
+      category: 'mode',
+      type: 'select',
+      currentValue: mode ?? 'auto',
+      options: modeList().map(({ id, name, description }) => ({ value: id, name, description })),
+    },
+  ];
+}
 
 const KINDS = {
   Bash: 'execute',
@@ -100,6 +159,8 @@ export async function serveAcp(context, { input = process.stdin, output = proces
   // The ACP sessions served, by the service's session ID which is their ID too.
   const sessions = new Map();
   const asked = new Map();
+  // The account's models as Claude Code last gave them in any session served, for the sessions made after.
+  let models = [];
   let nextId = 1;
   const write = (message) => output.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`);
   const notify = (sessionId, update) =>
@@ -162,7 +223,27 @@ export async function serveAcp(context, { input = process.stdin, output = proces
     } else if (message.type === 'session.event') {
       if (served.follow.apply(message.event)) translate(served, message.event.payload, true);
       served.wake?.();
-    } else if (message.type === 'session.updated') served.wake?.();
+    } else if (message.type === 'session.updated') {
+      // A choice made in a window, or by Claude entering plan mode, shows in the client too.
+      chosen(served, message.session);
+      served.wake?.();
+    }
+  }
+  // The session's model, effort and mode as the service holds them; a change is told to the client.
+  function chosen(served, session) {
+    const before = JSON.stringify([served.mode, served.model, served.effort]);
+    if (session.permissionMode && session.permissionMode !== served.mode) {
+      served.mode = session.permissionMode;
+      notify(served.id, { sessionUpdate: 'current_mode_update', currentModeId: served.mode });
+    }
+    if ('model' in session) served.model = session.model ?? null;
+    if ('effort' in session) served.effort = session.effort ?? null;
+    if (JSON.stringify([served.mode, served.model, served.effort]) !== before) offered(served);
+  }
+  const options = (served) => sessionOptions(served, models);
+  function offered(served) {
+    if (served.open)
+      notify(served.id, { sessionUpdate: 'config_option_update', configOptions: options(served) });
   }
 
   // A recorded event as ACP says it. Text is passed on as it streams; a stretch recorded whole is said here only where
@@ -219,7 +300,13 @@ export async function serveAcp(context, { input = process.stdin, output = proces
         if (live) void permission(served, payload.approvalId);
         break;
       case 'native.mode':
-        notify(id, { sessionUpdate: 'current_mode_update', currentModeId: payload.permissionMode });
+        chosen(served, { permissionMode: payload.permissionMode });
+        break;
+      case 'native.capabilities':
+        if (JSON.stringify(payload.models) !== JSON.stringify(models)) {
+          models = payload.models;
+          offered(served);
+        }
         break;
       case 'native.title':
         notify(id, { sessionUpdate: 'session_info_update', title: payload.title });
@@ -246,9 +333,9 @@ export async function serveAcp(context, { input = process.stdin, output = proces
           `\n\n${approval.questions
             .map(
               (item, index) =>
-                `${index + 1}. ${item.question}${item.options.length ? `（${item.options.join(' / ')}）` : ''}`,
+                `${index + 1}. ${item.question}${item.options.length ? t('cli:acp.options', { options: item.options.join(' / ') }) : ''}`,
             )
-            .join('\n')}\n\n（直接回复即可回答。）`,
+            .join('\n')}\n\n${t('cli:acp.replyToAnswer')}`,
         ),
       });
       served.wake?.();
@@ -257,14 +344,14 @@ export async function serveAcp(context, { input = process.stdin, output = proces
     const plan = approval.kind === 'plan';
     const options = plan
       ? [
-          { optionId: 'auto', name: '批准，自动执行', kind: 'allow_once' },
-          { optionId: 'acceptEdits', name: '批准，自动接受编辑', kind: 'allow_once' },
-          { optionId: 'default', name: '批准，每步询问', kind: 'allow_once' },
-          { optionId: 'reject', name: '继续规划', kind: 'reject_once' },
+          { optionId: 'auto', name: t('cli:acp.plan.auto'), kind: 'allow_once' },
+          { optionId: 'acceptEdits', name: t('cli:acp.plan.acceptEdits'), kind: 'allow_once' },
+          { optionId: 'default', name: t('cli:acp.plan.default'), kind: 'allow_once' },
+          { optionId: 'reject', name: t('cli:acp.plan.reject'), kind: 'reject_once' },
         ]
       : [
-          { optionId: 'allow', name: '允许', kind: 'allow_once' },
-          { optionId: 'reject', name: '拒绝', kind: 'reject_once' },
+          { optionId: 'allow', name: t('cli:acp.allow'), kind: 'allow_once' },
+          { optionId: 'reject', name: t('cli:acp.reject'), kind: 'reject_once' },
         ];
     const tool = served.follow.tools.get(approval.toolId);
     let outcome;
@@ -296,12 +383,13 @@ export async function serveAcp(context, { input = process.stdin, output = proces
         allowed,
         ...(plan && allowed ? { plan: { mode: outcome.optionId } } : {}),
       })
-      .catch((error) => context.err(`回复审批失败：${error.message}`));
+      .catch((error) => context.err(t('cli:acp.replyFailed', { reason: error.message })));
   }
 
   function served(sessionId) {
     const found = sessions.get(sessionId);
-    if (!found) throw Object.assign(new Error(`没有这个会话：${sessionId}`), { code: -32602 });
+    if (!found)
+      throw Object.assign(new Error(t('cli:acp.noSession', { id: sessionId })), { code: -32602 });
     return found;
   }
   function serve(session) {
@@ -311,16 +399,39 @@ export async function serveAcp(context, { input = process.stdin, output = proces
       streamed: new Set(),
       question: false,
       wake: undefined,
+      mode: session.permissionMode ?? 'auto',
+      model: session.model ?? null,
+      effort: session.effort ?? null,
+      // Told to the client: before it has the session's ID, nothing is said of it.
+      open: false,
     };
     sessions.set(session.id, entry);
     return entry;
   }
   const ignored = (servers) => {
     if (servers?.length)
-      context.err(
-        `ccdt acp 暂不连接客户端传来的 MCP 服务（${servers.map((server) => server.name).join('、')}）。`,
-      );
+      context.err(t('cli:acp.mcpIgnored', { names: servers.map((server) => server.name) }));
   };
+
+  // A choice made in the client, kept by the service for the session's next turns as a window's is. `answered`: the
+  // client gets the options back in the answer to its request, not in an update besides.
+  async function configure(entry, change, answered = false) {
+    const next = { mode: entry.mode, model: entry.model, effort: entry.effort, ...change };
+    await (
+      await connected()
+    ).request({
+      type: 'session.configure',
+      sessionId: entry.id,
+      permissionMode: next.mode,
+      ...('model' in change ? { model: next.model } : {}),
+      ...('effort' in change ? { effort: next.effort } : {}),
+    });
+    const modeChanged = next.mode !== entry.mode;
+    Object.assign(entry, next);
+    if (modeChanged)
+      notify(entry.id, { sessionUpdate: 'current_mode_update', currentModeId: entry.mode });
+    if (!answered) offered(entry);
+  }
 
   const methods = {
     initialize: () => ({
@@ -344,8 +455,20 @@ export async function serveAcp(context, { input = process.stdin, output = proces
       });
       const session = made.sessions.get(response.sessionId) ?? { id: response.sessionId };
       await kept(made, session);
-      serve(session);
-      return { sessionId: session.id, modes: modes(session.permissionMode) };
+      const entry = serve(session);
+      // The models are what Claude Code says it offers: read once, for the first session, as the desktop client
+      // reads them. A run gives them again; a service that cannot read them now leaves the model chosen alone.
+      if (!models.length)
+        await Promise.race([
+          made.request({ type: 'session.status', sessionId: session.id }).catch(() => {}),
+          new Promise((resolve) => setTimeout(resolve, 15000).unref?.()),
+        ]);
+      entry.open = true;
+      return {
+        sessionId: session.id,
+        modes: modes(entry.mode),
+        configOptions: options(entry),
+      };
     },
     // The newest page of its history is replayed; what is earlier stays in the windows.
     async 'session/load'({ sessionId, mcpServers }) {
@@ -356,7 +479,9 @@ export async function serveAcp(context, { input = process.stdin, output = proces
       const snapshot = await catchUp(made, entry.follow, (event, live) =>
         translate(entry, event.payload, live),
       );
-      return { modes: modes(snapshot?.session?.permissionMode ?? session.permissionMode) };
+      if (snapshot?.session) chosen(entry, snapshot.session);
+      entry.open = true;
+      return { modes: modes(entry.mode), configOptions: options(entry) };
     },
     // The client is done with the session here; it stays on the service, as every session does.
     'session/close'({ sessionId }) {
@@ -364,16 +489,34 @@ export async function serveAcp(context, { input = process.stdin, output = proces
       return {};
     },
     async 'session/set_mode'({ sessionId, modeId }) {
-      served(sessionId);
-      const made = await connected();
-      await made.request({ type: 'session.configure', sessionId, permissionMode: modeId });
-      notify(sessionId, { sessionUpdate: 'current_mode_update', currentModeId: modeId });
+      await configure(served(sessionId), { mode: modeId });
       return {};
+    },
+    // A model chosen starts at its own default effort, as in the desktop client.
+    async 'session/set_config_option'({ sessionId, configId, value }) {
+      const entry = served(sessionId);
+      const option = options(entry).find((item) => item.id === configId);
+      if (!option)
+        throw Object.assign(new Error(t('cli:acp.noOption', { id: configId })), { code: -32602 });
+      if (!option.options.some((item) => item.value === value))
+        throw Object.assign(new Error(t('cli:acp.noValue', { option: option.name, value })), {
+          code: -32602,
+        });
+      await configure(
+        entry,
+        configId === 'model'
+          ? { model: value === DEFAULT ? null : value, effort: null }
+          : configId === 'effort'
+            ? { effort: value === DEFAULT ? null : value }
+            : { mode: value },
+        true,
+      );
+      return { configOptions: options(entry) };
     },
     async 'session/prompt'({ sessionId, prompt }) {
       const entry = served(sessionId);
       const words = promptText(prompt);
-      if (!words) throw Object.assign(new Error('提示里没有文字。'), { code: -32602 });
+      if (!words) throw Object.assign(new Error(t('cli:acp.noText')), { code: -32602 });
       let made = await connected();
       made = await kept(made, made.sessions.get(sessionId) ?? { id: sessionId });
       entry.question = false;
@@ -399,9 +542,14 @@ export async function serveAcp(context, { input = process.stdin, output = proces
       if (entry.follow.started && status) {
         if (status.status === 'cancelled') return 'cancelled';
         if (status.status === 'failed')
-          throw Object.assign(new Error(entry.follow.errors.join('；') || '运行失败。'), {
-            code: -32603,
-          });
+          throw Object.assign(
+            new Error(
+              entry.follow.errors.join(t('cli:next.errorSeparator')) || t('cli:next.failed'),
+            ),
+            {
+              code: -32603,
+            },
+          );
         if (terminalStatuses.has(status.status) || status.waiting === 'background')
           return 'end_turn';
       }
@@ -454,7 +602,7 @@ export async function serveAcp(context, { input = process.stdin, output = proces
     if (!method)
       return write({
         id: message.id,
-        error: { code: -32601, message: `不支持 ${message.method}` },
+        error: { code: -32601, message: t('cli:acp.unsupported', { method: message.method }) },
       });
     try {
       write({ id: message.id, result: (await method(message.params ?? {})) ?? null });
@@ -476,12 +624,12 @@ export async function serveAcp(context, { input = process.stdin, output = proces
     try {
       message = JSON.parse(raw);
     } catch {
-      write({ id: null, error: { code: -32700, message: '不是 JSON。' } });
+      write({ id: null, error: { code: -32700, message: t('cli:acp.notJson') } });
       continue;
     }
     void handle(message);
   }
-  for (const waiting of asked.values()) waiting.reject(new Error('输入已结束。'));
+  for (const waiting of asked.values()) waiting.reject(new Error(t('cli:acp.inputEnded')));
   await service?.close().catch(() => {});
   return 0;
 }

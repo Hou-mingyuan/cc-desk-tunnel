@@ -7,6 +7,10 @@ import { PROTOCOL_VERSION } from '@cc-desk-tunnel/protocol';
 // commands. It relays a local WebSocket to the service, as it does for the desktop page.
 import { openProxyBridge } from '../../desktop/electron/proxy-bridge.mjs';
 import { components } from './runtime.mjs';
+import { t, wordsOf } from './i18n.mjs';
+
+// What a frame of the service says: its phrase in ccdt's language, or its text.
+const told = (message) => wordsOf(message.phrase ?? message.message, message.message);
 
 // The proxy for an address, as the desktop client gets it from the system, from the usual variables here. Only
 // HTTP CONNECT proxies are used; loopback and `no_proxy` addresses connect directly.
@@ -66,6 +70,8 @@ export class Service extends EventEmitter {
     super();
     this.sessions = new Map();
     this.devices = [];
+    // The projects of all the user's computers, as the service keeps them.
+    this.projects = [];
     this.waiting = new Map();
     this.ended = false;
     this.closed = new Promise((resolve) => (this.resolveClosed = resolve));
@@ -94,6 +100,7 @@ export class Service extends EventEmitter {
         }
         if (message.type === 'ready') {
           for (const session of message.sessions) this.sessions.set(session.id, session);
+          this.projects = message.projects;
           this.connectionId = message.connectionId;
           this.version = message.version;
           this.update = message.update;
@@ -101,7 +108,7 @@ export class Service extends EventEmitter {
         } else if (message.type === 'connection.error') {
           this.error = message;
           reject(
-            Object.assign(new Error(message.message), {
+            Object.assign(new Error(told(message)), {
               code: message.code,
               service: message.service,
             }),
@@ -110,6 +117,7 @@ export class Service extends EventEmitter {
           this.sessions.set(message.session.id, message.session);
         else if (message.type === 'session.deleted') this.sessions.delete(message.sessionId);
         else if (message.type === 'devices') this.devices = message.devices;
+        else if (message.type === 'projects') this.projects = message.projects;
         else if (message.type === 'service.update') {
           const { type: _type, ...update } = message;
           this.update = update;
@@ -118,13 +126,13 @@ export class Service extends EventEmitter {
         if (waiting) {
           this.waiting.delete(message.requestId);
           if (message.type === 'response' && !message.ok)
-            waiting.reject(Object.assign(new Error(message.message), { code: message.code }));
+            waiting.reject(Object.assign(new Error(told(message)), { code: message.code }));
           else waiting.resolve(message);
         }
         this.emit('message', message);
       });
       socket.on('close', () => {
-        reject(new Error(this.error?.message ?? '连接已关闭。'));
+        reject(new Error(this.error ? told(this.error) : t('cli:connection.closed')));
         this.end(true);
       });
       socket.on('error', () => {});
@@ -135,7 +143,7 @@ export class Service extends EventEmitter {
   request(command) {
     const requestId = command.requestId ?? randomUUID();
     return new Promise((resolve, reject) => {
-      if (this.ended) return reject(new Error('连接已关闭。'));
+      if (this.ended) return reject(new Error(t('cli:connection.closed')));
       this.waiting.set(requestId, { resolve, reject });
       this.socket.send(JSON.stringify({ ...command, requestId }));
     });
@@ -150,13 +158,13 @@ export class Service extends EventEmitter {
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.off('message', check);
-        reject(new Error('本机的执行通道没有就绪。'));
+        reject(new Error(t('cli:connection.channelNotReady')));
       }, timeoutMs);
       const check = () => {
         if (!ready() && !this.ended) return;
         clearTimeout(timer);
         this.off('message', check);
-        if (this.ended) reject(new Error('连接已关闭。'));
+        if (this.ended) reject(new Error(t('cli:connection.closed')));
         else resolve();
       };
       this.on('message', check);
@@ -170,7 +178,7 @@ export class Service extends EventEmitter {
     if (this.ended) return;
     this.ended = true;
     this.lost = lost;
-    for (const { reject } of this.waiting.values()) reject(new Error('连接已关闭。'));
+    for (const { reject } of this.waiting.values()) reject(new Error(t('cli:connection.closed')));
     this.waiting.clear();
     this.socket?.terminate();
     void Promise.resolve(this.bridge?.close(true)).finally(() => this.resolveClosed());

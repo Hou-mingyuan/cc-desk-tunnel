@@ -10,11 +10,13 @@ import {
 } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
 import { flushSync } from 'react-dom';
+import { wordsText } from '@cc-desk-tunnel/i18n';
 import {
   CircleHelp,
   Download,
   FileDown,
   FolderInput,
+  FolderMinus,
   FolderOpen,
   FolderSymlink,
   GitFork,
@@ -38,43 +40,50 @@ import type {
   Effort,
   EventPayload,
   PermissionMode,
+  Project,
   Session,
   SessionEvent,
 } from '@cc-desk-tunnel/protocol';
-import { FORCED_UPGRADE_SINCE, platformOf, runWorking } from '@cc-desk-tunnel/protocol';
+import { FORCED_UPGRADE_SINCE, platformOf, projectOf, runWorking } from '@cc-desk-tunnel/protocol';
 import { browserSession, browserSocket, watchActivity } from './browser-api.ts';
 import { CertificateWarning } from './WebGate.tsx';
 import { hostCapabilities } from './host-capabilities.ts';
 import AccountPanel from './AccountPanel.tsx';
 import { QuotaSummary } from './QuotaSummary.tsx';
 import { ProxyClient, RequestInterruptedError } from './client.ts';
+import { Trans } from 'react-i18next';
+import { say, useT } from './i18n.ts';
 import Composer from './Composer.tsx';
 import SessionBar from './SessionBar.tsx';
-import { isHere, thisDevice } from './device.ts';
+import { deviceName, isHere, thisDevice } from './device.ts';
 import { selfUpdating } from './platform.ts';
+import { useClientUpgrade } from './client-upgrade.ts';
 import { useDrafts } from './drafts.ts';
 import { useDrawerSwipe } from './useDrawerSwipe.ts';
 import { useWebNavigation } from './useWebNavigation.ts';
 import type { Place } from './useWebNavigation.ts';
 import SchedulePanel from './SchedulePanel.tsx';
-import { taskMessage, useSchedules } from './schedules.ts';
+import { outcomeText, taskMessage, useSchedules } from './schedules.ts';
 import type { Scenario } from './Composer.tsx';
 import Conversation from './Conversation.tsx';
 import FilePanel from './FilePanel.tsx';
-import { filePlaces, sessionFolder, sftpPath } from './files.ts';
+import { filePlaces, nativeLabels, sessionFolder, sftpPath } from './files.ts';
 import type { FilePlace } from './files.ts';
 import type { ConnectionForm } from './LoginPage.tsx';
 import type { SignInReport } from './Launcher.tsx';
 import { exportSession } from './exportSession.ts';
-import { onSharedChange, saveShared, shared, useShared } from './shared.ts';
+import { useShared } from './shared.ts';
 import { useNotifications } from './notifications.ts';
-import { folderName, isInside, isNewer, pathKey, withProject } from './paths.ts';
+import { isInside, isNewer, pathKey, projectName } from './paths.ts';
 import { getPrefs, setPrefs, toggled, usePrefs } from './prefs.ts';
 import { UPDATE_TICK_MS, lookDue } from './update-check.ts';
 import { actions, comboOf, keyFor, show as comboText } from './shortcuts.ts';
 import type { Action } from './shortcuts.ts';
 import { nextMode } from './modes.ts';
 import Rail from './Rail.tsx';
+import { setHelpOpener } from './help-nav.ts';
+import { suggestions } from './help-content.ts';
+import type { Target } from './help-content.ts';
 import type { Page } from './Rail.tsx';
 import {
   AddProjectDialog,
@@ -82,7 +91,7 @@ import {
   RenameProjectDialog,
   RenameSessionDialog,
 } from './SessionDialogs.tsx';
-import SettingsPage, { sections } from './SettingsPage.tsx';
+import SettingsPage, { sectionName } from './SettingsPage.tsx';
 import type { Section } from './SettingsPage.tsx';
 import Sidebar from './Sidebar.tsx';
 import TitleBar from './TitleBar.tsx';
@@ -95,6 +104,7 @@ import type { MenuItem, MenuPosition } from './ui.tsx';
 
 // The notes of every version so far are read only when asked for, and stay out of what the window starts with.
 const ReleaseNotes = lazy(() => import('./ReleaseNotes.tsx'));
+const HelpCenter = lazy(() => import('./HelpCenter.tsx'));
 
 // The newest event of a kind is the session's current native state.
 function latest<T extends EventPayload['type']>(events: SessionEvent[], type: T) {
@@ -107,24 +117,13 @@ function latest<T extends EventPayload['type']>(events: SessionEvent[], type: T)
 type OpenMenu = MenuPosition &
   (
     | { kind: 'session'; sessionId: string }
-    | { kind: 'project'; path: string }
+    | { kind: 'project'; deviceId: string; path: string }
     | { kind: 'move'; sessionId: string }
     | { kind: 'settings' }
     | { kind: 'update' }
     | { kind: 'bar'; label: string }
   );
 const narrow = () => matchMedia('(max-width: 700px)').matches;
-// The computer's projects, which the windows of its connections share (see shared.ts).
-function savedProjects(value: unknown = shared('projects')): string[] {
-  try {
-    value ??= JSON.parse(localStorage.getItem('proxy-projects') ?? '[]');
-    return Array.isArray(value)
-      ? value.filter((item): item is string => typeof item === 'string')
-      : [];
-  } catch {
-    return [];
-  }
-}
 
 // Owns the connection, the selection and every request; the components below render and report user intent.
 // On the desktop the window is a connection's: it signs in with what its sign-in window handed over, tells that
@@ -142,6 +141,7 @@ export function App({
   report?: (report: SignInReport) => void;
   leave?: (error: string | null) => void;
 } = {}) {
+  const t = useT();
   const host = hostCapabilities(!!browser);
   const [client] = useState(() => new ProxyClient());
   useEffect(() => {
@@ -188,8 +188,7 @@ export function App({
   const quotaPrimed = useRef<string | null>(null);
   const [findRequest, setFindRequest] = useState(0);
   const refreshed = useRef(new Set<string>());
-  const [projects, setProjects] = useState(savedProjects);
-  // The folders that hold sessions without a project; new ones are made in the first.
+  // The folders that hold plain sessions; new ones are made in the first.
   const [workspaceRoots, setWorkspaceRoots] = useState<string[]>([]);
   const [drafts, setDraft] = useDrafts();
   const [scenario, setScenario] = useState<Scenario>('chat');
@@ -279,7 +278,7 @@ export function App({
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteSession, setDeleteSession] = useState<Session | null>(null);
   const [renameSession, setRenameSession] = useState<Session | null>(null);
-  const [renameProject, setRenameProject] = useState<string | null>(null);
+  const [renameProject, setRenameProject] = useState<Project | null>(null);
   const [repointProject, setRepointProject] = useState<string | null>(null);
 
   const nativeMode = state.adapter === 'claude-code';
@@ -315,6 +314,20 @@ export function App({
   const onThis = (session: Session) => !browser && isHere(session, state.device, absent);
   const sessions = state.sessions.filter((session) => onThis(session));
   const elsewhere = state.sessions.filter((session) => !onThis(session));
+  // The user's other computers that are online, by name, for the help's examples.
+  const onlineOthers = state.devices
+    .filter((device) => device.ready && !device.server && device.id !== state.device?.id)
+    .map((device) => device.name);
+  // This computer's projects, as the service keeps them for all the user's computers.
+  const projects = state.projects.filter((project) => project.device.id === state.device?.id);
+  // The project a session is in, of whichever computer; one from before computers were told apart that is
+  // listed here is this one's. A session in none is a plain session.
+  const projectIn = (session: Session) =>
+    projectOf(
+      state.projects,
+      session.device?.id ?? (onThis(session) ? state.device?.id : undefined),
+      session.projectPath,
+    );
   const away = !!selected && !onThis(selected);
   // Another computer's session is worked on from here while that computer is connected and its commands
   // reach it: what is sent here runs there, as if sent there.
@@ -348,8 +361,8 @@ export function App({
   };
   const serverDevice = state.devices.find((device) => device.server)?.id;
   const filesPlaces = useMemo(
-    () => filePlaces(state.device, state.devices, state.files),
-    [state.device, state.devices, state.files],
+    () => filePlaces(t, state.device, state.devices, state.files),
+    [t, state.device, state.devices, state.files],
   );
   const selectedForFiles = selected;
   const filesStart = useCallback(
@@ -377,7 +390,7 @@ export function App({
     const device = selected?.device;
     const placeId = here ? 'local' : device?.id === serverDevice ? 'server' : device?.id;
     if (!placeId || !filesPlaces.some((entry) => entry.id === placeId)) {
-      setError('这个路径所在的电脑现在不在线，文件面板打不开它。');
+      setError(t('session:files.offline'));
       return;
     }
     setFilesPage(false);
@@ -452,16 +465,6 @@ export function App({
   );
   const capabilities = latest(events, 'native.capabilities') ?? state.capabilities;
   const metrics = latest(events, 'native.metrics');
-  // Quota belongs to the account, so the newest reading from any session wins over the selected session's.
-  const quota = [metrics, state.metrics]
-    .filter((item) => !!item?.rateLimits)
-    .sort((a, b) =>
-      (b!.rateLimits!.measuredAt ?? '').localeCompare(a!.rateLimits!.measuredAt ?? ''),
-    )[0];
-  const accountMetrics =
-    (metrics ?? state.metrics) && quota
-      ? { ...(metrics ?? state.metrics)!, rateLimits: quota.rateLimits }
-      : (metrics ?? state.metrics);
   const canCompact = !!latest(events, 'native.context')?.persisted;
   // A chat run holds the CLI's state while it goes; a terminal holds only its own session.
   const anyChat = state.sessions.some(
@@ -493,6 +496,8 @@ export function App({
     lastStatus.surface !== 'terminal' &&
     (lastStatus.status === 'cancelled' || lastStatus.status === 'failed');
   const signedOut = state.account?.loggedIn === false;
+  // The account's quota, as the service holds it; no session's figures carry it.
+  const quota = signedOut ? null : state.quota;
   const quotaSession = selected ?? state.sessions[0];
   const actionError = error instanceof RequestInterruptedError ? error.describe(connected) : error;
   const currentError = actionError ?? state.error;
@@ -501,6 +506,13 @@ export function App({
     selfUpdating && version && state.release && isNewer(state.release, version)
       ? state.release
       : null;
+  // A service newer than this client that holds no installer for it yet, as just after its own upgrade: the
+  // release page has it. The service tells when its own arrives.
+  const behind =
+    selfUpdating && version && state.service && isNewer(state.service, version) && !upgrade
+      ? state.service
+      : null;
+  const upgrading = useClientUpgrade(setError);
   // A service of a newer version: what that version changed can be read here, whether or not this system's
   // client upgrades itself.
   const ahead =
@@ -513,7 +525,7 @@ export function App({
   const live = state.update;
   const asked = useRef(false);
   useEffect(() => {
-    if (live?.state === 'failed' && live.detail && asked.current) setError(live.detail);
+    if (live?.state === 'failed' && live.detail && asked.current) setError(say(live.detail));
     if (live && !['checking', 'installing'].includes(live.state)) asked.current = false;
   }, [live]);
   // While the service looks again, the release it found last stays offered.
@@ -545,11 +557,12 @@ export function App({
   // refuses while anything runs, terminals at rest included, and cannot be forced.
   const working = state.sessions.filter((item) => runWorking(item.activeRun));
   const resting = state.sessions.filter((item) => item.activeRun && !runWorking(item.activeRun));
-  const titles = (sessions: Session[]) =>
-    sessions
-      .slice(0, 3)
-      .map((item) => `「${item.title}」`)
-      .join('') + (sessions.length > 3 ? ` 等 ${sessions.length} 个会话` : '');
+  const titles = (sessions: Session[]) => {
+    const shown = sessions.slice(0, 3).map((item) => item.title);
+    return sessions.length > 3
+      ? t('connection:update.titlesMore', { titles: shown, count: sessions.length })
+      : t('connection:update.titles', { titles: shown });
+  };
   const forcible =
     !!state.service &&
     state.service.localeCompare(FORCED_UPGRADE_SINCE, undefined, { numeric: true }) >= 0;
@@ -557,24 +570,36 @@ export function App({
     ? null
     : update?.state === 'available'
       ? {
-          label: `升级服务端到 ${update.latest}${
-            working.length
-              ? `（${working.length} 个会话正在运行）`
-              : !forcible && resting.length
-                ? '（先关闭终端、等后台任务结束）'
-                : ''
-          }`,
+          label: working.length
+            ? t('connection:update.serverWorking', {
+                version: update.latest ?? '',
+                count: working.length,
+              })
+            : !forcible && resting.length
+              ? t('connection:update.serverResting', { version: update.latest ?? '' })
+              : t('connection:update.server', { version: update.latest ?? '' }),
           icon: <Download />,
           disabled: busy || (!forcible && (working.length > 0 || resting.length > 0)),
           run: () => {
             const force = working.length > 0;
             const question = force
-              ? `${titles(working)}正在运行。\n\n升级会重启服务端：正在进行的回答、命令和等你确认的审批会被中断，可能需要重新开始。\n\n仍然强行升级到 ${update.latest}？`
-              : `服务端将升级到 ${update.latest} 并重启，需要几分钟，期间不能发送消息；重启后需重新连接。${
-                  resting.length
-                    ? `\n\n${titles(resting)}开着终端或在等后台任务，它们会被结束；会话本身保留，升级后可以继续。`
-                    : ''
-                }\n\n继续？`;
+              ? t('connection:update.forceQuestion', {
+                  titles: titles(working),
+                  count: working.length,
+                  version: update.latest ?? '',
+                })
+              : [
+                  t('connection:update.question', { version: update.latest ?? '' }),
+                  ...(resting.length
+                    ? [
+                        t('connection:update.restingEnd', {
+                          titles: titles(resting),
+                          count: resting.length,
+                        }),
+                      ]
+                    : []),
+                  t('connection:update.continue'),
+                ].join('\n\n');
             if (window.confirm(question))
               void act(async () => {
                 asked.current = true;
@@ -588,14 +613,18 @@ export function App({
         }
       : update?.state === 'manual'
         ? {
-            label: `服务端 ${update.latest} 需在服务器上升级`,
+            label: t('connection:update.manual', { version: update.latest ?? '' }),
             icon: <Download />,
             disabled: true,
             run: () => undefined,
           }
         : update?.state === 'installing' || update?.state === 'restarting'
           ? {
-              label: `服务端升级中：${update.detail ?? '重启'}`,
+              label: t('connection:update.installing', {
+                step: update.detail
+                  ? wordsText(t, update.detail)
+                  : t('connection:update.restarting'),
+              }),
               icon: <RefreshCw />,
               disabled: true,
               run: () => undefined,
@@ -603,10 +632,10 @@ export function App({
           : {
               label:
                 update?.state === 'checking'
-                  ? '正在检查更新…'
+                  ? t('connection:update.checking')
                   : update?.state === 'idle' && update.checkedAt
-                    ? `已是最新 ${state.service} · 再次检查`
-                    : '检查更新',
+                    ? t('connection:update.latest', { version: state.service ?? '' })
+                    : t('connection:update.check'),
               icon: <RefreshCw />,
               disabled: busy || update?.state === 'checking',
               run: () => {
@@ -692,7 +721,7 @@ export function App({
     if (client.state.error)
       notifications.push({
         kind: 'connection',
-        title: '连接中断',
+        title: t('nav:notice.disconnected'),
         body: client.state.error.split('\n')[0],
       });
   }, [state.status]);
@@ -702,25 +731,20 @@ export function App({
   useEffect(() => {
     if (connected) void window.desktop?.workspaceRoots().then(setWorkspaceRoots);
   }, [connected]);
+  // Before the service kept the projects, the computer kept one list for all its connections. A connection there
+  // was then hands it to its service once (see `projects:legacy` in electron/main.cjs).
   useEffect(() => {
-    localStorage.setItem('proxy-projects', JSON.stringify(projects));
-    saveShared('projects', projects);
-  }, [projects]);
-  // This computer's projects, for the user's other computers to start or move sessions into.
-  useEffect(() => {
-    if (!connected || browser || !state.device) return;
-    void client.request({ type: 'device.projects', projects }).catch(() => {});
-  }, [projects, connected, state.connectionId]);
-  useEffect(
-    () =>
-      onSharedChange('projects', (value) => {
-        const next = savedProjects(value);
-        setProjects((current) =>
-          JSON.stringify(current) === JSON.stringify(next) ? current : next,
-        );
-      }),
-    [],
-  );
+    if (!connected || !window.desktop) return;
+    void (async () => {
+      const legacy = await window.desktop!.legacyProjects();
+      if (!legacy) return;
+      for (const path of legacy.projects) {
+        const name = legacy.names[pathKey(path)]?.trim().slice(0, 60);
+        await client.request({ type: 'project.add', path, ...(name ? { name } : {}) });
+      }
+      await window.desktop!.legacyProjectsMoved();
+    })().catch(() => {});
+  }, [connected]);
   // Each session's native state is read once when it is first shown idle.
   useEffect(() => {
     if (
@@ -805,7 +829,7 @@ export function App({
           ? error
           : error instanceof Error
             ? error.message
-            : '操作失败。',
+            : t('common:failed'),
       );
     } finally {
       setBusy(false);
@@ -840,7 +864,7 @@ export function App({
       if (form.mode === 'remote') await window.desktop?.disconnectProxy();
       tell({
         status: 'disconnected',
-        error: error instanceof Error ? error.message : '连接失败。',
+        error: error instanceof Error ? error.message : t('connection:connectFailed'),
         mismatch: false,
         service: null,
         release: null,
@@ -881,7 +905,8 @@ export function App({
       last.page === next.page &&
       last.section === next.section &&
       last.settingsIndex === next.settingsIndex &&
-      last.sessionId === next.sessionId
+      last.sessionId === next.sessionId &&
+      last.article === next.article
     )
       return;
     trail.current = { places: [...places.slice(0, at + 1), next].slice(-50), at: 0 };
@@ -914,6 +939,27 @@ export function App({
     return false;
   };
   const show = (sessionId: string) => visit({ ...place, page: 'chat', sessionId });
+  // The help, at an article or its front page; any "?" in the window comes here.
+  const showHelp = (article?: string) => visit({ ...place, page: 'help', article });
+  useEffect(() => {
+    setHelpOpener(showHelp);
+    return () => setHelpOpener(null);
+  });
+  // What an article's button stands for: a setting, or something the window does.
+  const runHelp = (target: Target) => {
+    if ('article' in target) return showHelp(target.article);
+    if ('settings' in target) return open('settings', target.settings);
+    if (target.doing === 'schedules') return open('schedules');
+    open('chat');
+    if (target.doing === 'addProject') void addProject();
+    else if (target.doing === 'newSession') void newSession();
+    else if (target.doing === 'files' && !prefs.filePanel.open) toggleFiles();
+  };
+  // A new session with words put in its input box, for the user to change and send.
+  async function startWith(text: string) {
+    const made = await newSession();
+    if (made) setDraft(made, text);
+  }
   const open = (page: Page, section: Section = place.section) => {
     if (!host.schedules && page === 'schedules') return;
     if (
@@ -955,7 +1001,7 @@ export function App({
           ? error
           : error instanceof Error
             ? error.message
-            : '原生状态读取失败',
+            : t('session:statusFailed'),
       );
     } finally {
       statusPending.current = false;
@@ -974,19 +1020,30 @@ export function App({
       ),
     );
   }
-  async function createSession(projectPath: string) {
-    const response = await client.request({ type: 'session.create', title: '新会话', projectPath });
+  // In a folder of this computer, which becomes a project unless the session is a plain one.
+  async function createSession(projectPath: string, plain = false) {
+    const response = await client.request({
+      type: 'session.create',
+      title: t('session:newTitle'),
+      autoTitle: true,
+      projectPath,
+      ...(plain ? { plain } : {}),
+    });
     if (response.sessionId) show(response.sessionId);
+    return response.sessionId;
   }
   async function createInProject(path: string) {
-    await act(() => createSession(path));
+    await act(async () => {
+      await createSession(path);
+    });
   }
   // A session in a project of another of the user's computers that is connected.
   async function createElsewhere(deviceId: string, projectPath: string) {
     await act(async () => {
       const response = await client.request({
         type: 'session.create',
-        title: '新会话',
+        title: t('session:newTitle'),
+        autoTitle: true,
         projectPath,
         deviceId,
       });
@@ -1000,34 +1057,44 @@ export function App({
     }
     await act(async () => {
       const path = await window.desktop!.chooseProject();
-      if (path) setProjects((value) => withProject(value, path));
+      if (path) await client.request({ type: 'project.add', path });
     });
   }
   // The desktop gives an ordinary session a local directory; the browser creates one on the server.
-  async function newSession() {
+  async function newSession(): Promise<string | undefined> {
+    let made: string | undefined;
     if (browser) {
       await act(async () => {
-        const response = await client.request({ type: 'server.session.create', title: '新会话' });
-        if (response.sessionId) show(response.sessionId);
+        const response = await client.request({
+          type: 'server.session.create',
+          title: t('session:newTitle'),
+          autoTitle: true,
+        });
+        made = response.sessionId;
+        if (made) show(made);
       });
-      return;
+      return made;
     }
     if (window.desktop) {
       await act(async () => {
         const directory = await window.desktop!.createWorkspace();
         try {
-          await createSession(directory);
+          made = await createSession(directory, true);
         } catch (error) {
           await window.desktop!.removeWorkspace(directory);
           throw error;
         }
       });
-      return;
+      return made;
     }
     const path =
-      (away ? undefined : selected?.projectPath) ?? projects[0] ?? sessions[0]?.projectPath;
-    if (path) await createInProject(path);
+      (away ? undefined : selected?.projectPath) ?? projects[0]?.path ?? sessions[0]?.projectPath;
+    if (path)
+      await act(async () => {
+        made = await createSession(path);
+      });
     else await addProject();
+    return made;
   }
   // A due task is an ordinary message: to its session once that is idle, or to a session made for it. It is
   // never queued into a run, and waits while a terminal holds a session of this computer.
@@ -1049,7 +1116,7 @@ export function App({
       if (task.target.type === 'session') {
         const { sessionId } = task.target;
         session = sessions.find((item) => item.id === sessionId);
-        if (!session) throw new Error('目标会话已不存在');
+        if (!session) throw new Error(t('session:schedule.targetGone'));
         if (session.activeRun) return false;
       } else {
         const created = await client.request({
@@ -1058,7 +1125,7 @@ export function App({
           projectPath: task.target.projectPath,
         });
         session = client.state.sessions.find((item) => item.id === created.sessionId);
-        if (!session) throw new Error('新会话创建失败');
+        if (!session) throw new Error(t('session:schedule.createFailed'));
         // Creating a session moved the live stream to it; the session being read takes it back.
         if (selectedId) client.select(selectedId);
       }
@@ -1076,7 +1143,7 @@ export function App({
       await client.request({
         type: 'message.send',
         sessionId: session.id,
-        text: taskMessage(task, due),
+        text: taskMessage(t, task, due),
         scenario: 'chat',
       });
       return true;
@@ -1084,8 +1151,8 @@ export function App({
     (task, outcome) =>
       notifications.push({
         kind: 'schedule',
-        title: '定时任务未发出',
-        body: `${task.name}：${outcome.text}`,
+        title: t('nav:notice.scheduleNotSent'),
+        body: t('nav:notice.scheduleOutcome', { name: task.name, text: outcomeText(t, outcome) }),
       }),
     host.schedules,
   );
@@ -1093,7 +1160,7 @@ export function App({
   async function placeHere(session: Session) {
     const path = window.desktop
       ? await window.desktop.chooseProject()
-      : window.prompt('这台电脑上的项目目录', session.projectPath);
+      : window.prompt(t('session:project.pathHere'), session.projectPath);
     return path?.trim() || null;
   }
   // Moves a session to a directory chosen here, on this computer, which also takes it over from the computer
@@ -1103,7 +1170,6 @@ export function App({
       const projectPath = await placeHere(session);
       if (!projectPath) return;
       await client.request({ type: 'session.move', sessionId: session.id, projectPath });
-      setProjects((value) => withProject(value, projectPath));
     });
   }
   // A fork continues from the same context in a session of its own. Forking before a message brings that
@@ -1116,6 +1182,7 @@ export function App({
       const response = await client.request({
         type: 'session.fork',
         sessionId: session.id,
+        title: t('session:fork.title', { title: session.title.slice(0, 116) }),
         ...(before ? { beforeMessageId: before.id } : {}),
         ...(projectPath ? { projectPath } : {}),
       });
@@ -1169,7 +1236,7 @@ export function App({
     const pinned = prefs.pinnedSessions.includes(session.id);
     return [
       {
-        label: pinned ? '取消置顶' : '置顶',
+        label: pinned ? t('nav:unpin') : t('nav:pin'),
         icon: pinned ? <PinOff /> : <Pin />,
         run: () =>
           setPrefs((value) => ({
@@ -1178,7 +1245,7 @@ export function App({
           })),
       },
       {
-        label: '重命名',
+        label: t('session:action.rename'),
         icon: <Pencil />,
         disabled: !idle || !!session.activeRun,
         run: () => {
@@ -1190,7 +1257,7 @@ export function App({
       ...(host.localProjects
         ? [
             {
-              label: '分叉',
+              label: t('session:action.fork'),
               icon: <GitFork />,
               disabled: !idle || !!session.activeRun,
               run: () => {
@@ -1200,7 +1267,7 @@ export function App({
           ]
         : []),
       {
-        label: '导出 Markdown',
+        label: t('session:action.export'),
         icon: <FileDown />,
         disabled: !connected,
         run: () => {
@@ -1210,7 +1277,7 @@ export function App({
         },
       },
       {
-        label: '重新同步',
+        label: t('session:action.resync'),
         icon: <RefreshCw />,
         disabled: !connected,
         run: () => client.resync(session.id),
@@ -1219,7 +1286,7 @@ export function App({
       ...(!browser
         ? [
             {
-              label: '移到项目…',
+              label: t('session:action.move'),
               icon: <FolderSymlink />,
               disabled: !idle || !!session.activeRun,
               run: () => {
@@ -1231,7 +1298,7 @@ export function App({
       ...(nativeMode && host.terminalClient
         ? [
             {
-              label: '用 ccdt 打开',
+              label: t('session:action.ccdt'),
               icon: <SquareTerminal />,
               // ccdt takes over a terminal of its own left on the session; a chat run has to end first.
               disabled: !idle || (!!session.activeRun && session.activeRun.surface !== 'terminal'),
@@ -1244,7 +1311,7 @@ export function App({
       ...(nativeMode
         ? [
             {
-              label: '刷新状态',
+              label: t('session:action.refresh'),
               icon: <RefreshCw />,
               disabled: !idle || anyChat || refreshing || !!history?.loading,
               run: () => {
@@ -1254,7 +1321,7 @@ export function App({
           ]
         : []),
       {
-        label: '删除',
+        label: t('session:action.delete'),
         icon: <Trash2 />,
         danger: true,
         separated: true,
@@ -1267,41 +1334,65 @@ export function App({
       },
     ];
   }
-  function projectMenu(path: string): MenuItem[] {
+  // A project of this computer or of another of the user's, connected or not. Only this computer's are pinned,
+  // opened or pointed at another folder here; a new session goes into another computer's while it is connected.
+  function projectMenu(entry: Project): MenuItem[] {
+    const { path } = entry;
+    const here = entry.device.id === state.device?.id;
     const key = pathKey(path);
     const pinned = prefs.pinnedProjects.includes(key);
+    const reached = state.devices.some((device) => device.id === entry.device.id && device.ready);
     return [
       {
-        label: '新建会话',
+        label: t('nav:newSession'),
         icon: <Plus />,
-        disabled: !connected || busy || refreshing,
+        disabled: !connected || busy || refreshing || (!here && !reached),
         run: () => {
-          void createInProject(path);
+          void (here ? createInProject(path) : createElsewhere(entry.device.id, path));
         },
       },
-      {
-        label: pinned ? '取消置顶' : '置顶',
-        icon: pinned ? <PinOff /> : <Pin />,
-        run: () =>
-          setPrefs((value) => ({ ...value, pinnedProjects: toggled(value.pinnedProjects, key) })),
-      },
-      { label: '修改显示名称', icon: <Pencil />, run: () => setRenameProject(path) },
-      {
-        label: '更改文件夹…',
-        icon: <FolderInput />,
-        disabled: !connected || busy,
-        run: () => {
-          if (!window.desktop) return setRepointProject(path);
-          void act(async () => {
-            const chosen = await window.desktop!.chooseProject();
-            if (chosen) await repoint(path, chosen);
-          });
-        },
-      },
-      ...(window.desktop
+      ...(here
         ? [
             {
-              label: '打开文件夹',
+              label: pinned ? t('nav:unpin') : t('nav:pin'),
+              icon: pinned ? <PinOff /> : <Pin />,
+              run: () =>
+                setPrefs((value) => ({
+                  ...value,
+                  pinnedProjects: toggled(value.pinnedProjects, key),
+                })),
+            },
+          ]
+        : []),
+      {
+        label: t('session:project.rename'),
+        icon: <Pencil />,
+        disabled: !connected,
+        run: () => {
+          setError(null);
+          setRenameProject(entry);
+        },
+      },
+      ...(here
+        ? [
+            {
+              label: t('session:project.changeFolder'),
+              icon: <FolderInput />,
+              disabled: !connected || busy,
+              run: () => {
+                if (!window.desktop) return setRepointProject(path);
+                void act(async () => {
+                  const chosen = await window.desktop!.chooseProject();
+                  if (chosen) await repoint(path, chosen);
+                });
+              },
+            },
+          ]
+        : []),
+      ...(here && window.desktop
+        ? [
+            {
+              label: t('session:project.openFolder'),
               icon: <FolderOpen />,
               separated: true,
               run: () => {
@@ -1310,72 +1401,73 @@ export function App({
             },
           ]
         : []),
+      // The folder and its sessions stay; the sessions are plain ones until it is a project again.
+      {
+        label: t('session:project.remove'),
+        icon: <FolderMinus />,
+        danger: true,
+        separated: true,
+        disabled: !connected || busy,
+        run: () => {
+          void act(async () => {
+            await client.request({ type: 'project.remove', deviceId: entry.device.id, path });
+          });
+        },
+      },
     ];
-  }
-  const projectLabel = (path: string) => prefs.projectNames[pathKey(path)] || folderName(path);
-  // The projects of this computer: the ones listed here and the folders its sessions are in.
-  function herePaths() {
-    const paths = [...projects];
-    for (const item of sessions)
-      if (
-        !isInside(item.projectPath, workspaceRoots) &&
-        !paths.some((path) => pathKey(path) === pathKey(item.projectPath))
-      )
-        paths.push(item.projectPath);
-    return paths;
   }
   // Every project the session could belong to, the one it is in marked. A session of another computer is in
   // none of them, also when a folder here has the same path: moving it into one takes it over.
   function moveMenu(session: Session): MenuItem[] {
     const here = onThis(session);
     return [
-      ...herePaths().map((path) => ({
-        label: projectLabel(path),
-        detail: path,
-        checked: here && pathKey(path) === pathKey(session.projectPath),
+      ...projects.map((entry) => ({
+        label: projectName(entry),
+        detail: entry.path,
+        checked: here && pathKey(entry.path) === pathKey(session.projectPath),
         run: () => {
-          if (!here || pathKey(path) !== pathKey(session.projectPath))
+          if (!here || pathKey(entry.path) !== pathKey(session.projectPath))
             void act(async () => {
               await client.request({
                 type: 'session.move',
                 sessionId: session.id,
-                projectPath: path,
+                projectPath: entry.path,
               });
             });
         },
       })),
       // The projects of the user's other computers that are connected, under each computer's name.
       ...state.devices
-        .filter(
-          (device) =>
-            device.id !== state.device?.id && !device.server && device.ready && device.projects,
-        )
+        .filter((device) => device.id !== state.device?.id && !device.server && device.ready)
         .flatMap((device) =>
-          device.projects!.map((path, index) => ({
-            label: folderName(path),
-            detail: `${device.name} · ${path}`,
-            separated: index === 0,
-            checked:
-              session.device?.id === device.id && pathKey(path) === pathKey(session.projectPath),
-            run: () => {
-              if (
-                session.device?.id !== device.id ||
-                pathKey(path) !== pathKey(session.projectPath)
-              )
-                void act(async () => {
-                  await client.request({
-                    type: 'session.move',
-                    sessionId: session.id,
-                    projectPath: path,
-                    deviceId: device.id,
+          state.projects
+            .filter((entry) => entry.device.id === device.id)
+            .map((entry, index) => ({
+              label: projectName(entry),
+              detail: `${device.name} · ${entry.path}`,
+              separated: index === 0,
+              checked:
+                session.device?.id === device.id &&
+                pathKey(entry.path) === pathKey(session.projectPath),
+              run: () => {
+                if (
+                  session.device?.id !== device.id ||
+                  pathKey(entry.path) !== pathKey(session.projectPath)
+                )
+                  void act(async () => {
+                    await client.request({
+                      type: 'session.move',
+                      sessionId: session.id,
+                      projectPath: entry.path,
+                      deviceId: device.id,
+                    });
                   });
-                });
-            },
-          })),
+              },
+            })),
         ),
       // A folder that is no project yet becomes one with the move.
       {
-        label: '其他文件夹…',
+        label: t('session:project.otherFolder'),
         icon: <FolderOpen />,
         separated: true,
         run: () => {
@@ -1384,99 +1476,106 @@ export function App({
       },
     ];
   }
-  // Points a project at another folder: the service moves its sessions there with what Claude Code keeps of
-  // the project, and what this computer keeps about it (its place in the list, its name, its pin) follows.
+  // Points a project at another folder: the service moves it there, its name and place in the list along with its
+  // sessions and what Claude Code keeps of it, and this computer's pin follows.
   async function repoint(from: string, to: string) {
     const key = pathKey(from);
     const next = pathKey(to);
     if (key === next) return;
     await client.request({ type: 'project.move', from, to });
-    setProjects((value) => [
-      ...new Map(
-        value
-          .map((path) => (pathKey(path) === key ? to : path))
-          .map((path) => [pathKey(path), path]),
-      ).values(),
-    ]);
-    setPrefs((value) => {
-      const projectNames = { ...value.projectNames };
-      if (projectNames[key] && !projectNames[next]) projectNames[next] = projectNames[key];
-      delete projectNames[key];
-      return {
-        ...value,
-        projectNames,
-        pinnedProjects: [
-          ...new Set(value.pinnedProjects.map((item) => (item === key ? next : item))),
-        ],
-      };
-    });
+    setPrefs((value) => ({
+      ...value,
+      pinnedProjects: [
+        ...new Set(value.pinnedProjects.map((item) => (item === key ? next : item))),
+      ],
+    }));
   }
   const adapterName = nativeMode ? 'Claude Code' : 'Simulation';
   const accountName = signedOut
-    ? '未登录'
-    : (state.account?.email ?? capabilities?.account.email ?? (nativeMode ? '账号' : '离线模拟'));
-  const upgradeItem: MenuItem | null = upgrade
-    ? {
-        label: `升级客户端到 ${upgrade}${working.length ? `（${working.length} 个会话正在运行）` : ''}`,
-        icon: <Download />,
-        disabled: busy || working.length > 0,
-        run: () => {
-          void act(() => window.desktop!.installUpdate());
-        },
-      }
-    : null;
+    ? t('nav:bar.signedOut')
+    : (state.account?.email ??
+      capabilities?.account.email ??
+      t(nativeMode ? 'nav:bar.accountUnnamed' : 'nav:bar.simulation'));
+  // The client's upgrade, from the service or the release page; while one runs, how it goes and a way to stop it.
+  const upgradeItems: MenuItem[] = upgrading.step
+    ? [
+        { label: upgrading.text!, icon: <Download />, disabled: true, run: () => undefined },
+        ...(upgrading.cancellable
+          ? [{ label: t('connection:update.cancelClient'), icon: <X />, run: upgrading.cancel }]
+          : []),
+      ]
+    : [upgrade, behind]
+        .filter((target): target is string => !!target)
+        .map((target) => ({
+          label: working.length
+            ? t(
+                target === upgrade
+                  ? 'connection:update.clientWorking'
+                  : 'connection:update.githubWorking',
+                { version: target, count: working.length },
+              )
+            : t(target === upgrade ? 'connection:update.client' : 'connection:update.github', {
+                version: target,
+              }),
+          icon: <Download />,
+          disabled: busy || working.length > 0,
+          run: () => upgrading.start(target === upgrade ? undefined : target),
+        }));
   // What an upgrade would bring is read where the upgrade is offered, before it is taken.
   const newer =
     upgrade ??
+    behind ??
     ahead ??
     (update && ['available', 'manual'].includes(update.state) ? (update.latest ?? null) : null);
   const updates = [
     ...(newer
       ? [
           {
-            label: `查看 ${newer} 的更新内容`,
+            label: t('connection:update.notes', { version: newer }),
             icon: <ScrollText />,
             run: () => setNotes(newer),
           },
         ]
       : []),
-    ...(upgradeItem ? [upgradeItem] : []),
+    ...upgradeItems,
     ...(serviceUpdate ? [serviceUpdate] : []),
   ];
   // The rail shows its button only for an update that exists, not for the standing offer to look for one.
-  const pendingUpdate = upgrade
-    ? `客户端可升级到 ${upgrade}`
-    : update && ['available', 'manual', 'installing', 'restarting'].includes(update.state)
-      ? (serviceUpdate?.label ?? null)
-      : null;
+  const pendingUpdate =
+    upgrading.text ??
+    (upgrade || behind
+      ? t('connection:update.clientAvailable', { version: upgrade ?? behind ?? '' })
+      : update && ['available', 'manual', 'installing', 'restarting'].includes(update.state)
+        ? (serviceUpdate?.label ?? null)
+        : null);
   // What a menu shows beside an item that has a shortcut.
   const hint = (action: Action) =>
-    (prefs.shortcuts.enabled && comboText(keyFor(prefs, action))) || undefined;
+    (prefs.shortcuts.enabled && comboText(t, keyFor(prefs, action))) || undefined;
   const settingsMenu: MenuItem[] = [
     ...(host.accountManagement
       ? [
           {
-            label: `账号 · ${accountName}`,
+            label: t('nav:bar.account', { name: accountName }),
             icon: <UserRound />,
             detail: signedOut
-              ? '点击登录 Claude 账号'
+              ? t('nav:bar.signIn')
               : (state.account?.subscriptionType ??
                 capabilities?.account.subscriptionType ??
-                '账号与额度'),
+                t('nav:bar.accountQuota')),
             run: () => open('settings', 'account'),
           },
         ]
       : []),
     {
-      label: '设置',
+      label: t('nav:bar.settings'),
       icon: <Settings />,
       hint: hint('settings'),
       separated: true,
       run: () => open('settings', 'general'),
     },
-    { label: '帮助', icon: <CircleHelp />, run: () => open('settings', 'help') },
+    { label: t('nav:page.help'), icon: <CircleHelp />, run: () => showHelp() },
     {
-      label: browser ? '退出登录' : '断开连接',
+      label: t(browser ? 'nav:bar.signOut' : 'nav:bar.disconnect'),
       icon: <LogOut />,
       separated: true,
       run: disconnect,
@@ -1486,10 +1585,10 @@ export function App({
   const canCreate = connected && !busy && !refreshing;
   const barMenus: BarMenu[] = [
     {
-      label: '文件',
+      label: t('nav:bar.file'),
       items: [
         {
-          label: '新建会话',
+          label: t('nav:newSession'),
           hint: hint('newSession'),
           disabled: !canCreate,
           run: () => {
@@ -1499,7 +1598,7 @@ export function App({
         ...(host.localProjects
           ? [
               {
-                label: '添加项目…',
+                label: t('nav:bar.addProject'),
                 disabled: !connected || busy,
                 run: () => {
                   void addProject();
@@ -1508,7 +1607,7 @@ export function App({
             ]
           : []),
         {
-          label: '导出会话…',
+          label: t('nav:bar.export'),
           disabled: !selected || !connected,
           separated: true,
           run: () => {
@@ -1517,32 +1616,47 @@ export function App({
             });
           },
         },
-        { label: browser ? '退出登录' : '断开连接', separated: true, run: disconnect },
-        ...(window.desktop ? [{ label: '退出', run: () => void window.desktop!.quit() }] : []),
+        {
+          label: t(browser ? 'nav:bar.signOut' : 'nav:bar.disconnect'),
+          separated: true,
+          run: disconnect,
+        },
+        ...(window.desktop
+          ? [{ label: t('nav:bar.quit'), run: () => void window.desktop!.quit() }]
+          : []),
       ],
     },
     {
-      label: '视图',
+      label: t('nav:bar.view'),
       items: [
         {
-          label: '查找',
+          label: t('nav:bar.find'),
           hint: hint('find'),
           disabled: !selected || place.page !== 'chat',
           run: () => setFindRequest((value) => value + 1),
         },
-        { label: sideOpen ? '收起侧栏' : '展开侧栏', hint: hint('toggleSide'), run: toggleSide },
-        { label: '会话', separated: true, checked: place.page === 'chat', run: () => open('chat') },
+        {
+          label: t(sideOpen ? 'nav:collapseSidebar' : 'nav:bar.expandSidebar'),
+          hint: hint('toggleSide'),
+          run: toggleSide,
+        },
+        {
+          label: t('nav:page.sessions'),
+          separated: true,
+          checked: place.page === 'chat',
+          run: () => open('chat'),
+        },
         ...(host.schedules
           ? [
               {
-                label: '定时任务',
+                label: t('nav:page.schedules'),
                 checked: place.page === 'schedules',
                 run: () => open('schedules'),
               },
             ]
           : []),
         {
-          label: '设置',
+          label: t('nav:bar.settings'),
           hint: hint('settings'),
           checked: place.page === 'settings',
           run: () => open('settings'),
@@ -1550,27 +1664,37 @@ export function App({
         ...(window.desktop
           ? [
               {
-                label: '放大',
+                label: t('nav:bar.zoomIn'),
                 hint: hint('zoomIn'),
                 separated: true,
                 run: () => window.desktop!.zoom(1),
               },
-              { label: '缩小', hint: hint('zoomOut'), run: () => window.desktop!.zoom(-1) },
-              { label: '实际大小', hint: hint('zoomReset'), run: () => window.desktop!.zoom(0) },
+              {
+                label: t('nav:bar.zoomOut'),
+                hint: hint('zoomOut'),
+                run: () => window.desktop!.zoom(-1),
+              },
+              {
+                label: t('nav:bar.zoomReset'),
+                hint: hint('zoomReset'),
+                run: () => window.desktop!.zoom(0),
+              },
             ]
           : []),
       ],
     },
     {
-      label: '帮助',
+      label: t('nav:page.help'),
       items: [
-        { label: '使用说明', run: () => open('settings', 'help') },
+        { label: t('nav:bar.guide'), run: () => showHelp() },
         {
-          label: '快捷键',
+          label: t('nav:bar.shortcuts'),
           run: () => open('settings', 'shortcuts'),
         },
-        ...(project.url ? [{ label: '项目主页', separated: true, run: openProject }] : []),
-        { label: '检查更新', run: () => open('settings', 'about') },
+        ...(project.url
+          ? [{ label: t('nav:bar.homepage'), separated: true, run: openProject }]
+          : []),
+        { label: t('connection:update.check'), run: () => open('settings', 'about') },
       ],
     },
   ];
@@ -1623,9 +1747,9 @@ export function App({
     return (
       <main className="web-login">
         <section className="web-login-body">
-          <h1>连接服务端工作台</h1>
+          <h1>{t('connection:web.workbench')}</h1>
           {browser.selfSigned && <CertificateWarning />}
-          <p role="status">{currentError ?? '正在连接…'}</p>
+          <p role="status">{currentError ?? t('connection:connecting')}</p>
           {state.status === 'disconnected' && (
             <button
               className="button"
@@ -1637,11 +1761,11 @@ export function App({
                 )
               }
             >
-              重新连接
+              {t('connection:reconnect.button')}
             </button>
           )}
           <button className="button" onClick={disconnect}>
-            退出登录
+            {t('nav:bar.signOut')}
           </button>
         </section>
       </main>
@@ -1652,25 +1776,33 @@ export function App({
     return <main className="app-waiting" aria-busy="true" />;
   const menuSession =
     menu?.kind === 'session' ? state.sessions.find((item) => item.id === menu.sessionId) : null;
+  const menuProject =
+    menu?.kind === 'project' ? projectOf(state.projects, menu.deviceId, menu.path) : undefined;
   const moved =
     menu?.kind === 'move' ? state.sessions.find((item) => item.id === menu.sessionId) : null;
   const openMenu =
-    !menu || (menu.kind === 'session' && !menuSession)
+    !menu || (menu.kind === 'session' && !menuSession) || (menu.kind === 'project' && !menuProject)
       ? null
       : menu.kind === 'session'
-        ? { label: `会话操作 · ${menuSession!.title}`, items: sessionMenu(menuSession!) }
+        ? {
+            label: t('nav:sessionActionsOf', { title: menuSession!.title }),
+            items: sessionMenu(menuSession!),
+          }
         : menu.kind === 'project'
-          ? { label: `项目操作 · ${menu.path}`, items: projectMenu(menu.path) }
+          ? {
+              label: t('nav:projectActions', { path: menu.path }),
+              items: projectMenu(menuProject!),
+            }
           : menu.kind === 'move'
             ? {
-                label: '会话所在的项目',
-                heading: '下一条消息会告诉 Claude 换了项目或电脑；聊过的会话仍沿用原项目的记忆',
+                label: t('session:composer.project'),
+                heading: t('session:project.moveHint'),
                 items: moved ? moveMenu(moved) : [],
               }
             : menu.kind === 'settings'
-              ? { label: '设置与账号', items: settingsMenu }
+              ? { label: t('nav:page.settings'), items: settingsMenu }
               : menu.kind === 'update'
-                ? { label: '更新', items: updates }
+                ? { label: t('nav:page.update'), items: updates }
                 : {
                     label: menu.label,
                     items: barMenus.find((item) => item.label === menu.label)?.items ?? [],
@@ -1678,9 +1810,9 @@ export function App({
   const quotaFooter =
     inBrowser && nativeMode ? (
       <QuotaSummary
-        metrics={signedOut ? null : accountMetrics}
+        quota={quota}
         connected={connected}
-        emptyMessage={signedOut ? '尚未登录 Claude' : undefined}
+        emptyMessage={signedOut ? t('nav:quota.signedOut') : undefined}
         onOpen={() => open('settings', 'account')}
       />
     ) : undefined;
@@ -1697,12 +1829,14 @@ export function App({
           place.page === 'chat'
             ? (selected?.title ?? 'CC Desk Tunnel')
             : place.page === 'schedules'
-              ? '定时任务'
-              : place.settingsIndex && narrow()
-                ? '设置'
-                : inBrowser && place.section === 'account'
-                  ? '订阅用量'
-                  : (sections.find((item) => item.id === place.section)?.name ?? '设置')
+              ? t('nav:page.schedules')
+              : place.page === 'help'
+                ? t('nav:page.help')
+                : place.settingsIndex && narrow()
+                  ? t('nav:bar.settings')
+                  : inBrowser && place.section === 'account'
+                    ? t('nav:title.usage')
+                    : sectionName(t, place.section)
         }
         back={
           !inBrowser && narrow() && place.page === 'settings'
@@ -1740,7 +1874,11 @@ export function App({
             : setMenu({ kind: 'settings', ...position })
         }
       />
-      <button className="sidebar-shade" aria-label="收起侧栏" onClick={() => changeSide(false)} />
+      <button
+        className="sidebar-shade"
+        aria-label={t('nav:collapseSidebar')}
+        onClick={() => changeSide(false)}
+      />
       {place.page === 'settings' ? (
         <SettingsPage
           client={client}
@@ -1769,11 +1907,11 @@ export function App({
               client={client}
               usageOnly={!!browser}
               quotaUnavailable={
-                inBrowser && !state.sessions.length ? '开始会话后可读取额度' : undefined
+                inBrowser && !state.sessions.length ? t('nav:quota.afterSession') : undefined
               }
               account={nativeMode ? state.account : null}
               capabilities={signedOut ? null : capabilities}
-              metrics={signedOut ? null : accountMetrics}
+              quota={quota}
               refreshing={refreshing}
               disabled={
                 !state.sessions.length || !connected || refreshing || (inBrowser && signedOut)
@@ -1786,11 +1924,24 @@ export function App({
             />
           }
         />
+      ) : place.page === 'help' ? (
+        <Suspense fallback={null}>
+          <HelpCenter
+            article={place.article}
+            here={state.device?.name ?? t('common:device.here')}
+            others={onlineOthers}
+            browser={!!browser}
+            version={version || state.service || ''}
+            go={showHelp}
+            run={runHelp}
+            tryPrompt={host.localProjects ? (text) => void startWith(text) : undefined}
+          />
+        </Suspense>
       ) : place.page === 'schedules' ? (
         <SchedulePanel
           schedules={schedules}
           sessions={sessions}
-          projects={projects}
+          projects={projects.map((entry) => entry.path)}
           capabilities={capabilities}
         />
       ) : (
@@ -1799,10 +1950,10 @@ export function App({
             sessions={sessions}
             elsewhere={elsewhere}
             devices={state.devices}
+            serverDeviceId={state.serverDeviceId}
             selectedId={selected?.id}
-            projects={host.localProjects ? projects : []}
+            projects={state.projects}
             localProjects={host.localProjects}
-            workspaceRoots={workspaceRoots}
             connected={connected}
             busy={busy}
             refreshing={refreshing}
@@ -1828,7 +1979,17 @@ export function App({
             sessionMenu={(session, position) =>
               setMenu({ kind: 'session', sessionId: session.id, ...position })
             }
-            projectMenu={(path, position) => setMenu({ kind: 'project', path, ...position })}
+            projectMenu={
+              browser
+                ? undefined
+                : (entry, position) =>
+                    setMenu({
+                      kind: 'project',
+                      deviceId: entry.device.id,
+                      path: entry.path,
+                      ...position,
+                    })
+            }
             footer={quotaFooter}
           />
           <main className="workspace">
@@ -1836,7 +1997,7 @@ export function App({
               <div className="error-banner" role="alert">
                 <span>{currentError}</span>
                 <IconButton
-                  title="关闭错误提示"
+                  title={t('session:closeError')}
                   onClick={() => {
                     setError(null);
                     client.update({ error: null });
@@ -1849,7 +2010,7 @@ export function App({
             {!connected && (
               <div className="connection-banner" role="status">
                 <Unplug />
-                连接中断，等待恢复
+                {t('connection:reconnect.waiting')}
               </div>
             )}
             <Conversation
@@ -1869,6 +2030,17 @@ export function App({
                 void newSession();
               }}
               loadEarlier={() => client.loadEarlier(selected!.id)}
+              suggestions={
+                !selected || controlsDisabled || away || inputDisabled
+                  ? undefined
+                  : suggestions(t, {
+                      project: !!projectIn(selected!),
+                      other: onlineOthers[0],
+                      schedules: host.schedules,
+                    })
+              }
+              suggest={(text) => setDraft(selected!.id, text)}
+              moreExamples={() => showHelp()}
               edit={
                 controlsDisabled || away
                   ? undefined
@@ -1876,7 +2048,7 @@ export function App({
                       // Only a confirmed non-delivery can be resent in place. A missing receipt is not proof.
                       if (deliveryStatus === 'not_sent') {
                         if (draft && draft !== text) {
-                          setError('输入框里还有草稿，请先发送或清空，再编辑这条未送达的消息。');
+                          setError(t('session:message.draftFirst'));
                           return;
                         }
                         setError(null);
@@ -1928,21 +2100,21 @@ export function App({
               <div className="elsewhere-bar" role="status">
                 <Unplug />
                 <p>
-                  与服务端的连接断开了，正在重新连接。运行中的任务仍在服务端继续，连上之后这里会补上期间的内容；
-                  {state.error ? `原因：${state.error.split('\n')[0]}` : '不需要做什么。'}
+                  {state.error
+                    ? t('connection:reconnect.bodyWithReason', {
+                        reason: state.error.split('\n')[0],
+                      })
+                    : t('connection:reconnect.body')}
                 </p>
                 <button type="button" className="button" onClick={disconnect}>
-                  断开并回到登录页
+                  {t('connection:reconnect.leave')}
                 </button>
               </div>
             )}
             {beside.length > 0 && (
               <div className="elsewhere-bar" role="status">
                 <Laptop />
-                <p>
-                  连接{beside.join('、')}
-                  里有会话正在这个文件夹里运行。两边同时改动文件可能互相覆盖，建议等一边做完，或让它们在不同的文件夹里工作。
-                </p>
+                <p>{t('session:elsewhere.beside', { names: beside })}</p>
               </div>
             )}
             {selected && away && host.localProjects && (
@@ -1950,16 +2122,31 @@ export function App({
                 <Laptop />
                 {remote ? (
                   <p>
-                    这个会话在设备“{selected.device?.name}”上，项目目录是{' '}
-                    <code>{selected.projectPath}</code>
-                    。在这里发的消息、审批和停止都作用于那台电脑上的会话，命令也在那里执行。要换到这台电脑上做，选它在这里的项目目录或分叉到本机。
+                    <Trans
+                      t={t}
+                      i18nKey="session:elsewhere.remote"
+                      values={{
+                        device: selected.device
+                          ? deviceName(t, selected.device, state.serverDeviceId)
+                          : '',
+                        path: selected.projectPath,
+                      }}
+                      components={{ code: <code /> }}
+                    />
                   </p>
                 ) : (
                   <p>
-                    这个会话在设备“{selected.device?.name ?? '未知设备'}”上，项目目录是{' '}
-                    <code>{selected.projectPath}</code>
-                    。那台电脑目前不在线，这里只能查看；它连上服务后可以直接在这里操作。要在这台电脑上接着做，先选它在这里的项目目录；下一条消息会告诉
-                    Claude 换了电脑。
+                    <Trans
+                      t={t}
+                      i18nKey="session:elsewhere.offline"
+                      values={{
+                        device: selected.device
+                          ? deviceName(t, selected.device, state.serverDeviceId)
+                          : t('nav:unknownDevice'),
+                        path: selected.projectPath,
+                      }}
+                      components={{ code: <code /> }}
+                    />
                   </p>
                 )}
                 <button
@@ -1968,7 +2155,7 @@ export function App({
                   disabled={controlsDisabled}
                   onClick={(event) => {
                     // With projects here the session goes into one of them, or into a folder chosen there.
-                    if (!herePaths().length) return void takeOver(selected);
+                    if (!projects.length) return void takeOver(selected);
                     const box = event.currentTarget.getBoundingClientRect();
                     setMenu({
                       kind: 'move',
@@ -1979,7 +2166,7 @@ export function App({
                     });
                   }}
                 >
-                  在本机继续…
+                  {t('session:elsewhere.takeOver')}
                 </button>
                 <button
                   type="button"
@@ -1989,14 +2176,20 @@ export function App({
                     void fork(selected);
                   }}
                 >
-                  分叉到本机…
+                  {t('session:elsewhere.forkHere')}
                 </button>
               </div>
             )}
             {browser && selected && away && !remote && (
               <div className="elsewhere-bar" role="status">
                 <Laptop />
-                <p>设备“{selected.device?.name ?? '未知设备'}”未连接，当前只能查看会话。</p>
+                <p>
+                  {t('session:elsewhere.notConnected', {
+                    device: selected.device
+                      ? deviceName(t, selected.device, state.serverDeviceId)
+                      : t('nav:unknownDevice'),
+                  })}
+                </p>
               </div>
             )}
             {nativeMode && selected && !selected.activeRun && (!away || remote) && (
@@ -2017,13 +2210,7 @@ export function App({
               <Composer
                 openAccount={() => open('settings', 'account')}
                 session={selected}
-                projectName={
-                  state.devices.some(
-                    (device) => device.server && device.id === selected.device?.id,
-                  ) || isInside(selected.projectPath, workspaceRoots)
-                    ? null
-                    : projectLabel(selected.projectPath)
-                }
+                projectName={projectIn(selected) ? projectName(projectIn(selected)!) : null}
                 chooseProject={
                   controlsDisabled || away
                     ? undefined
@@ -2047,6 +2234,7 @@ export function App({
                 capabilities={capabilities}
                 nativeSession={nativeSession}
                 metrics={metrics}
+                quota={quota}
                 send={(text) => {
                   void send(text);
                 }}
@@ -2072,13 +2260,13 @@ export function App({
             )}
           </main>
           {filesOpen && (
-            <aside className="file-column" aria-label="文件">
+            <aside className="file-column" aria-label={t('session:files.title')}>
               {!filesPage && (
                 <div
                   className="file-resizer"
                   role="separator"
                   aria-orientation="vertical"
-                  aria-label="调整文件面板宽度"
+                  aria-label={t('session:files.resize')}
                   onPointerDown={resizeFiles}
                 />
               )}
@@ -2093,6 +2281,7 @@ export function App({
                 noticeKey={window.desktop?.boot.connection ?? ''}
                 project={selected && onThis(selected) ? selected.projectPath : null}
                 request={filesRequest}
+                aliasOf={nativeLabels(state.projects, state.sessions)}
               />
             </aside>
           )}
@@ -2113,8 +2302,8 @@ export function App({
       )}
       {repointProject && (
         <AddProjectDialog
-          title="更改项目文件夹"
-          action="更改"
+          title={t('session:project.changeFolderTitle')}
+          action={t('session:project.change')}
           busy={busy}
           connected={connected}
           error={actionError}
@@ -2139,7 +2328,7 @@ export function App({
             void act(async () => {
               if (!written) return;
               const path = (await window.desktop?.asOnDisk(written)) ?? written;
-              setProjects((value) => withProject(value, path));
+              await client.request({ type: 'project.add', path });
               setCreateOpen(false);
             });
           }}
@@ -2158,7 +2347,7 @@ export function App({
               await client.request({ type: 'session.delete', sessionId: deleteSession.id });
               setDraft(deleteSession.id, '');
               // A plain session's directory goes with it when the session left nothing there.
-              if (isInside(deleteSession.projectPath, workspaceRoots))
+              if (onThis(deleteSession) && !projectIn(deleteSession))
                 void window.desktop?.removeWorkspace(deleteSession.projectPath);
               setDeleteSession(null);
             });
@@ -2167,17 +2356,22 @@ export function App({
       )}
       {renameProject && (
         <RenameProjectDialog
-          path={renameProject}
-          name={prefs.projectNames[pathKey(renameProject)] ?? ''}
+          path={renameProject.path}
+          name={renameProject.name ?? ''}
+          busy={busy}
+          connected={connected}
+          error={actionError}
           close={() => setRenameProject(null)}
           rename={(name) => {
-            setPrefs((value) => {
-              const projectNames = { ...value.projectNames };
-              if (name) projectNames[pathKey(renameProject)] = name;
-              else delete projectNames[pathKey(renameProject)];
-              return { ...value, projectNames };
+            void act(async () => {
+              await client.request({
+                type: 'project.rename',
+                deviceId: renameProject.device.id,
+                path: renameProject.path,
+                name,
+              });
+              setRenameProject(null);
             });
-            setRenameProject(null);
           }}
         />
       )}

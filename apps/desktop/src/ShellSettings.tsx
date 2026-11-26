@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import type { DeviceShell } from '@cc-desk-tunnel/protocol';
+import { useT } from './i18n.ts';
 import type { ConnectedDevice, ProxyClient } from './client.ts';
-import { shellField } from './setting-fields.ts';
+import { shellField as fieldOf } from './setting-fields.ts';
+import { SettingText } from './ui.tsx';
 
 // The shell Claude is told the user prefers for scripts on this Windows computer. Git Bash is listed whether or not the
 // computer has it, and can be chosen once it does. The service keeps the choice for this computer alone and lists it
@@ -13,6 +15,8 @@ export default function ShellSettings({
   client: ProxyClient;
   here: ConnectedDevice;
 }) {
+  const t = useT();
+  const shellField = fieldOf(t);
   const [failure, setFailure] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const has = (shell: DeviceShell) => !!here.shells?.includes(shell);
@@ -22,18 +26,15 @@ export default function ShellSettings({
     try {
       await client.request({ type: 'device.shell', shell });
     } catch (error) {
-      setFailure(error instanceof Error ? error.message : '保存失败。');
+      setFailure(error instanceof Error ? error.message : t('settings:saveFailed'));
     } finally {
       setSaving(false);
     }
   }
   return (
     <>
-      <h2 className="page-heading">脚本用哪种 Shell</h2>
-      <p className="muted page-section-note">
-        PowerShell 7 随客户端自带；装了 Git for Windows 的电脑还可以用它的 Git Bash，两种都在时
-        Claude 按任务选用。改动在每个会话的下一条消息时告诉 Claude。
-      </p>
+      <h2 className="page-heading">{t('settings:shell.heading')}</h2>
+      <p className="muted page-section-note">{t('settings:shell.intro')}</p>
       {failure && (
         <p className="error-text" role="alert">
           {failure}
@@ -41,10 +42,7 @@ export default function ShellSettings({
       )}
       <div className="settings-list card">
         <label>
-          <span>
-            <strong>{shellField.title}</strong>
-            <small>{shellField.detail}</small>
-          </span>
+          <SettingText title={shellField.title} detail={shellField.detail} help={shellField.help} />
           <select
             aria-label={shellField.title}
             disabled={saving}
@@ -54,7 +52,7 @@ export default function ShellSettings({
             <option value="">{shellField.unset}</option>
             {shellField.options.map(([shell, name]) => (
               <option key={shell} value={shell} disabled={!has(shell)}>
-                {has(shell) ? name : `${name}（未检测到）`}
+                {has(shell) ? name : t('settings:shell.notFound', { name })}
               </option>
             ))}
           </select>

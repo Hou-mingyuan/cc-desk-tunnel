@@ -1,10 +1,12 @@
 import { z } from 'zod';
 import { webCommandSchemas, webSettingsStateSchema, webTotpSetupSchema } from './web.ts';
 import { webCertificateStateSchema } from './web-certificate.ts';
+import { phraseSchema, wordsSchema } from './phrase.ts';
+export * from './phrase.ts';
 export * from './web.ts';
 export * from './web-certificate.ts';
 
-export const PROTOCOL_VERSION = 28;
+export const PROTOCOL_VERSION = 30;
 // The release each protocol version began with, from 0.2.4 on: a client newer than its service signs in with
 // the service's number to have it upgrade (see the README). A new number adds its line here.
 export const PROTOCOL_HISTORY: Readonly<Record<string, number>> = {
@@ -27,6 +29,8 @@ export const PROTOCOL_HISTORY: Readonly<Record<string, number>> = {
   '0.3.15': 26,
   '0.3.16': 27,
   '0.3.17': 28,
+  '0.3.18': 29,
+  '0.3.21': 30,
 };
 export const MAX_FRAME_BYTES = 256 * 1024;
 // The longest global instructions edited here, in characters; it keeps a frame of them within MAX_FRAME_BYTES.
@@ -95,13 +99,14 @@ export const accountStateSchema = z.object({
   login: z
     .object({ url: z.url(), method: z.enum(['browser', 'setup-token']).optional() })
     .nullable(),
-  notice: z.string().optional(),
+  // Why the last sign-in failed, or what the official command last said.
+  notice: wordsSchema.optional(),
 });
 export type AccountState = z.infer<typeof accountStateSchema>;
 const setupTokenResultSchema = z.object({
   token: z.string(),
   saved: z.boolean(),
-  error: z.string().optional(),
+  error: wordsSchema.optional(),
 });
 export type SetupTokenResult = z.infer<typeof setupTokenResultSchema>;
 // The part of the official CLI's user settings the GUI edits. null means unset: the CLI's own default applies.
@@ -189,6 +194,13 @@ export const rateLimitsSchema = z.object({
   ),
   measuredAt: timestamp.optional(),
 });
+// The plan quota of the account the service runs Claude Code under, as the service holds it (see `Quotas`): the
+// account's, not a session's. `error` says why the service's last read of it failed; the reading kept says how old it is.
+export const accountQuotaSchema = z.object({
+  rateLimits: rateLimitsSchema.nullable(),
+  error: wordsSchema.optional(),
+});
+export type AccountQuota = z.infer<typeof accountQuotaSchema>;
 const usageTotals = {
   requests: z.number().int().nonnegative(),
   inputTokens: z.number().nonnegative(),
@@ -299,7 +311,7 @@ export const eventPayloadSchema = z.discriminatedUnion('type', [
     surface: z.enum(['chat', 'terminal']).optional(),
     waiting: waitingSchema.optional(),
     activity: terminalActivitySchema.optional(),
-    reason: z.string().optional(),
+    reason: wordsSchema.optional(),
   }),
   z.object({ type: z.literal('text.delta'), messageId: id, text: z.string() }),
   z.object({ type: z.literal('thinking.delta'), messageId: id, text: z.string() }),
@@ -319,7 +331,8 @@ export const eventPayloadSchema = z.discriminatedUnion('type', [
     persisted: z.boolean(),
     updatedAt: timestamp.optional(),
   }),
-  z.object({ type: z.literal('native.notice'), text: z.string() }),
+  // Words of the service, or a status of the CLI's own (`compacting`) that the client knows by its word.
+  z.object({ type: z.literal('native.notice'), text: wordsSchema }),
   // The mode the CLI works in changed during the run: Claude entered plan mode by itself, or a plan was approved
   // and the mode chosen for it took over. The session keeps it for the turns that follow.
   z.object({ type: z.literal('native.mode'), permissionMode: permissionModeSchema }),
@@ -349,11 +362,10 @@ export const eventPayloadSchema = z.discriminatedUnion('type', [
     type: z.literal('native.metrics'),
     context: contextUsageSchema.nullable(),
     usage: nativeUsageSchema.nullable(),
-    rateLimits: rateLimitsSchema.nullable(),
     // How long the prompt cache the turn wrote lasts, as its requests were billed; only on a turn's end, and only when
     // it wrote one.
     cacheTtl: z.enum(['5m', '1h']).optional(),
-    errors: z.object({ context: z.string().optional(), usage: z.string().optional() }).optional(),
+    errors: z.object({ context: wordsSchema.optional() }).optional(),
   }),
   z.object({ type: z.literal('native.title'), title: z.string().min(1).max(120) }),
   z.object({
@@ -426,6 +438,9 @@ export const eventPayloadSchema = z.discriminatedUnion('type', [
     toolId: z.string().min(1),
     status: z.enum(['completed', 'denied', 'cancelled', 'failed', 'unknown']),
     output: z.string(),
+    // A result the service gave in the tool's stead says so in `phrase` too; `output` holds it in the source
+    // language, as the record of the run.
+    phrase: phraseSchema.optional(),
     exitCode: z.number().int().nullable(),
   }),
   z.object({
@@ -434,7 +449,12 @@ export const eventPayloadSchema = z.discriminatedUnion('type', [
     stream: z.enum(['stdout', 'stderr']),
     text: z.string(),
   }),
-  z.object({ type: z.literal('run.error'), code: z.string(), message: z.string() }),
+  z.object({
+    type: z.literal('run.error'),
+    code: z.string(),
+    message: z.string(),
+    phrase: phraseSchema.optional(),
+  }),
 ]);
 export type EventPayload = z.infer<typeof eventPayloadSchema>;
 type Payload<T extends EventPayload['type']> = Extract<EventPayload, { type: T }>;
@@ -543,6 +563,28 @@ export const sessionSchema = z.object({
     .nullable(),
 });
 export type Session = z.infer<typeof sessionSchema>;
+// A folder of one of the user's computers that the user keeps as a project. The service keeps the list, for every
+// client of every computer alike. A session belongs to the project its computer and folder name; a session whose
+// folder is no project is a plain one.
+export const projectSchema = z.object({
+  device: deviceSchema,
+  path: z.string().min(1).max(2048),
+  // What the user calls it; the folder's own name where it has none.
+  name: z.string().min(1).max(60).optional(),
+  // The directory on the service that Claude Code works in for it, under its native/ folder (see `nativeRoot`).
+  root: id,
+  createdAt: timestamp,
+});
+export type Project = z.infer<typeof projectSchema>;
+// Whether a folder of a computer is one of the projects.
+export const projectOf = (
+  projects: Project[],
+  deviceId: string | undefined,
+  path: string,
+): Project | undefined =>
+  projects.find(
+    (project) => project.device.id === deviceId && pathKey(project.path) === pathKey(path),
+  );
 // Whether a session's run is at work, so that the restart of a service upgrade would cut it off: a turn under way or
 // waiting on the user, or a terminal whose CLI works or waits. A terminal open at rest, and a turn ended but for the
 // background tasks it left, are not: an upgrade only ends them, and the session goes on after it.
@@ -577,7 +619,7 @@ const installerSchema = z.object({
 export const serviceUpdateSchema = z.object({
   state: z.enum(['idle', 'checking', 'available', 'manual', 'installing', 'restarting', 'failed']),
   latest: versionSchema.optional(),
-  detail: z.string().optional(),
+  detail: wordsSchema.optional(),
   checkedAt: z.number().int().nonnegative().optional(),
 });
 export type ServiceUpdate = z.infer<typeof serviceUpdateSchema>;
@@ -589,17 +631,22 @@ export const commandSchema = z.discriminatedUnion('type', [
       type: z.literal('server.session.create'),
       ...request,
       title: z.string().trim().min(1).max(120),
+      autoTitle: z.literal(true).optional(),
     })
     .strict(),
-  // On the computer of this connection, or on `deviceId`, another of the user's that is connected, in one of the
-  // projects it has (see `device.projects`).
+  // On the computer of this connection, whose folder becomes a project unless the session is `plain`, or on
+  // `deviceId`, another of the user's that is connected, in one of its projects.
   z
     .object({
       type: z.literal('session.create'),
       ...request,
       title: z.string().trim().min(1).max(120),
+      // The title is the client's word for a new session, which Claude's name for it replaces.
+      autoTitle: z.literal(true).optional(),
       projectPath: z.string().trim().min(1).max(2048),
       deviceId: id.optional(),
+      // A session of no project, in a folder made for it alone.
+      plain: z.literal(true).optional(),
     })
     .strict(),
   z.object({ type: z.literal('account.status'), ...request }).strict(),
@@ -653,15 +700,6 @@ export const commandSchema = z.discriminatedUnion('type', [
   // The shell the user prefers Claude to run scripts in on the computer of this connection; null leaves it to Claude.
   z
     .object({ type: z.literal('device.shell'), ...request, shell: deviceShellSchema.nullable() })
-    .strict(),
-  // The projects of the computer of this connection, as its client lists them, for the user's other computers to
-  // start or move sessions into while it is connected.
-  z
-    .object({
-      type: z.literal('device.projects'),
-      ...request,
-      projects: z.array(z.string().trim().min(1).max(2048)).max(500),
-    })
     .strict(),
   z.object({ type: z.literal('instructions.get'), ...request }).strict(),
   z
@@ -720,7 +758,8 @@ export const commandSchema = z.discriminatedUnion('type', [
       effort: effortSchema.nullable().optional(),
     })
     .strict(),
-  // Points a session at a project directory on the computer that asks, which the session is on from then.
+  // Points a session at a directory on the computer that asks, which the session is on from then and which becomes
+  // a project, or at a project of another connected computer (`deviceId`).
   z
     .object({
       type: z.literal('session.move'),
@@ -741,6 +780,36 @@ export const commandSchema = z.discriminatedUnion('type', [
       to: z.string().trim().min(1).max(2048),
     })
     .strict(),
+  // Makes a folder of the computer that asks one of its projects, under `name` if one is given.
+  z
+    .object({
+      type: z.literal('project.add'),
+      ...request,
+      path: z.string().trim().min(1).max(2048),
+      name: z.string().trim().min(1).max(60).optional(),
+    })
+    .strict(),
+  // A project of the computer that asks, or of another of the user's (`deviceId`), connected or not. Removing one
+  // leaves the folder and its sessions where they are, plain sessions from then; what Claude Code keeps of it on
+  // the service stays too, for when the folder is a project again.
+  z
+    .object({
+      type: z.literal('project.remove'),
+      ...request,
+      deviceId: id.optional(),
+      path: z.string().trim().min(1).max(2048),
+    })
+    .strict(),
+  // An empty name gives the project back the folder's own.
+  z
+    .object({
+      type: z.literal('project.rename'),
+      ...request,
+      deviceId: id.optional(),
+      path: z.string().trim().min(1).max(2048),
+      name: z.string().trim().max(60),
+    })
+    .strict(),
   z.object({ type: z.literal('session.compact'), ...request, sessionId: id }).strict(),
   // Copies a session under a new ID. With `beforeMessageId` the copy ends just before that user message,
   // which is how an earlier message is edited and sent again without losing the original. The copy is on the
@@ -750,6 +819,8 @@ export const commandSchema = z.discriminatedUnion('type', [
       type: z.literal('session.fork'),
       ...request,
       sessionId: id,
+      // The copy's title, in the client's words (it marks it as a fork of the source's).
+      title: z.string().trim().min(1).max(120),
       beforeMessageId: id.optional(),
       projectPath: z.string().trim().min(1).max(2048).optional(),
     })
@@ -944,9 +1015,13 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
     // The newest Windows installer the service holds, for clients that want to upgrade themselves.
     client: installerSchema.optional(),
     sessions: z.array(sessionSchema),
+    projects: z.array(projectSchema),
     // Names the stored history: it changes when history is rewritten, and what a client kept of the old goes.
     // Without it a client keeps nothing.
     historyId: id.optional(),
+    // The service's own computer, where sessions of the browser are: the client names it in its language, and
+    // shows it so in a session's place whatever name the record holds.
+    serverDeviceId: id,
     browser: z.object({ sessionId: id, serverDeviceId: id, selfSigned: z.boolean() }).optional(),
     // The service's files, where the file panel can reach them (see `files.attach`): the data directory, whose
     // `native/<root>` are the sessions' working directories, the home directory, and whether its secrets are kept
@@ -959,6 +1034,8 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
         protected: z.boolean(),
       })
       .optional(),
+    // The plan quota the service holds; every change to it follows as `quota`.
+    quota: accountQuotaSchema.optional(),
   }),
   z.object({
     type: z.literal('response'),
@@ -966,11 +1043,15 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
     ok: z.boolean(),
     sessionId: id.optional(),
     code: z.string().optional(),
+    // A failure in the source language, for logs and clients from before phrases; `phrase` says it for the user.
     message: z.string().optional(),
+    phrase: phraseSchema.optional(),
   }),
   z.object({ type: z.literal('session.snapshot'), ...historyPageSchema.shape }),
   z.object({ type: z.literal('session.updated'), session: sessionSchema }),
   z.object({ type: z.literal('session.deleted'), sessionId: id }),
+  // The plan quota as the service now holds it, sent to every connection whenever it changes.
+  z.object({ type: z.literal('quota'), ...accountQuotaSchema.shape }),
   z.object({ type: z.literal('session.event'), event: eventSchema }),
   z.object({
     type: z.literal('session.fragment'),
@@ -1011,6 +1092,8 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
     modelMs: z.number().nonnegative(),
     ttftMs: z.number().nonnegative().nullable(),
     outputPerSecond: z.number().nonnegative().nullable(),
+    // The official CLI's API-price estimate, not a subscription bill.
+    costUsd: z.number().nonnegative(),
     // The oldest record the call log holds at all. The log is pruned, so a session older than this is counted from here.
     firstRecordAt: timestamp.nullable(),
   }),
@@ -1041,7 +1124,9 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('connection.error'),
     code: z.string(),
+    // In the source language: clients of every version read it. Those with phrases say `phrase` instead.
     message: z.string(),
+    phrase: phraseSchema.optional(),
     service: versionSchema.optional(),
     // The installer of the service's version, while the service is still fetching it.
     preparing: z
@@ -1053,7 +1138,12 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
       .optional(),
     client: installerSchema.optional(),
   }),
-  z.object({ type: z.literal('service.update'), ...serviceUpdateSchema.shape }),
+  // `client` is the installer for clients, once the service has fetched it after it started.
+  z.object({
+    type: z.literal('service.update'),
+    ...serviceUpdateSchema.shape,
+    client: installerSchema.optional(),
+  }),
   // The user's computers connected now, each with whether commands reach it yet: sent on signing in and
   // whenever it changes. A computer not listed is away, and its sessions can only be read.
   z.object({
@@ -1065,11 +1155,11 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
         // The shells the computer runs scripts in, and the one its user prefers, if any; none for the service.
         shells: z.array(deviceShellSchema).optional(),
         shell: deviceShellSchema.optional(),
-        // Its projects, once its client has said them (see `device.projects`).
-        projects: z.array(z.string()).optional(),
       }),
     ),
   }),
+  // The projects of all the user's computers, sent on signing in (`ready`) and to every window whenever they change.
+  z.object({ type: z.literal('projects'), projects: z.array(projectSchema) }),
   // The execution channel runs over connections the device opens to this same address. `secret` signs them
   // in; it belongs to this connection alone and ends with it.
   z.object({ type: z.literal('tunnel.offer'), connectionId: id, secret: tunnelSecret }),

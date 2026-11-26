@@ -13,12 +13,14 @@ const {
 const { createHash, randomBytes } = require('node:crypto');
 const net = require('node:net');
 const { tmpdir } = require('node:os');
+const { failure } = require('./failure.cjs');
 
 // The program's directory (`base`) and what is in it:
 //   settings.json      this computer's settings, which are no connection's (see `computer` below)
 //   shared/            what all windows share, one file a value, so that a window replaces a value whole and
 //                      never part of another window's: the connections' names, the one that signs in by itself,
-//                      the page's preferences
+//                      the page's preferences; and the project list of before the service kept the projects,
+//                      until each connection there was has handed it to its service (see `setAsideProjects`)
 //   connections/<id>/  a connection, signed in to one service: its process's profile, with the sign-in, drafts,
 //                      scheduled tasks, pasted pictures and log
 //   Partitions/<id>/   the storage of a connection's window (see `migrate`)
@@ -61,7 +63,7 @@ const named = (name) => {
   const text = String(name ?? '')
     .replace(/\s+/g, ' ')
     .trim();
-  if (text.length > 24) throw new Error('名称最多 24 个字。');
+  if (text.length > 24) throw failure('desktop:connections.nameTooLong', { max: 24 });
   return text;
 };
 function list(base) {
@@ -75,12 +77,12 @@ function list(base) {
 }
 function taken(entries, name, except) {
   if (name && entries.some((entry) => entry.id !== except && entry.name === name))
-    throw new Error('已有同名的连接。');
+    throw failure('desktop:connections.nameTaken');
 }
 function rename(base, id, name) {
   const entries = list(base);
   const entry = entries.find((item) => item.id === id);
-  if (!entry) throw new Error('这个连接已不存在。');
+  if (!entry) throw failure('desktop:error.connectionGone');
   entry.name = named(name);
   taken(entries, entry.name, id);
   writeShared(base, 'connections', entries);
@@ -178,7 +180,7 @@ function tell(base, id, command) {
 // in it is `pending`: a mistyped address leaves no record, and its directory goes once its window has.
 function create(base, login) {
   const entries = list(base);
-  if (entries.length >= limit) throw new Error(`最多保存 ${limit} 个连接。`);
+  if (entries.length >= limit) throw failure('desktop:connections.tooMany', { max: limit });
   const id = randomBytes(4).toString('hex');
   mkdirSync(directory(base, id), { recursive: true });
   writeSettings(base, id, { login, pending: Date.now() });
@@ -255,8 +257,8 @@ function busy(base, except) {
 // Sessions are the service's and stay there.
 function remove(base, id) {
   const entries = list(base);
-  if (!entries.some((entry) => entry.id === id)) throw new Error('这个连接已不存在。');
-  if (running(base, id)) throw new Error('这个连接的窗口还开着，请先退出它。');
+  if (!entries.some((entry) => entry.id === id)) throw failure('desktop:error.connectionGone');
+  if (running(base, id)) throw failure('desktop:connections.stillOpen');
   if (autoLogin(base) === id) setAutoLogin(base, id, false);
   writeShared(
     base,
@@ -324,6 +326,7 @@ function migrate(base) {
     adopt(base);
     writeShared(base, 'layout', { version: 2 });
   }
+  setAsideProjects(base);
   for (const entry of list(base)) {
     if (running(base, entry.id)) continue;
     for (const name of storage) {
@@ -335,6 +338,40 @@ function migrate(base) {
     }
     if (!loginOf(base, entry.id)?.token) shed(base, entry.id);
   }
+}
+// Before 0.3.18 the computer kept one project list for all its connections (`shared/projects.json`), with the
+// projects' names among the page's preferences. The service keeps the projects now: the list and the names wait
+// in `shared/legacy-projects.json` for each connection there was to hand them to its service once (see App.tsx).
+function setAsideProjects(base) {
+  const projects = readShared(base, 'projects');
+  if (!Array.isArray(projects)) return;
+  const prefs = readShared(base, 'prefs');
+  const names =
+    prefs?.projectNames && typeof prefs.projectNames === 'object' ? prefs.projectNames : {};
+  writeShared(base, 'legacy-projects', {
+    projects: projects.filter((item) => typeof item === 'string'),
+    names: Object.fromEntries(Object.entries(names).filter(([, name]) => typeof name === 'string')),
+    waiting: list(base).map((entry) => entry.id),
+  });
+  if (prefs && 'projectNames' in prefs) {
+    const { projectNames: _names, ...rest } = prefs;
+    writeShared(base, 'prefs', rest);
+  }
+  rmSync(sharedFile(base, 'projects'), { force: true });
+}
+// The list for a connection that has yet to hand it over; none for a connection made since.
+function legacyProjects(base, id) {
+  const legacy = readShared(base, 'legacy-projects');
+  return legacy?.waiting?.includes(id) ? { projects: legacy.projects, names: legacy.names } : null;
+}
+// The list goes once no connection there was is left to hand it over.
+function projectsMoved(base, id) {
+  const legacy = readShared(base, 'legacy-projects');
+  if (!legacy) return;
+  const known = new Set(list(base).map((entry) => entry.id));
+  const waiting = legacy.waiting.filter((item) => item !== id && known.has(item));
+  if (waiting.length) writeShared(base, 'legacy-projects', { ...legacy, waiting });
+  else rmSync(sharedFile(base, 'legacy-projects'), { force: true });
 }
 // What Chromium keeps in a profile, as Electron's of 0.3.16 had: with their `-journal`, `-wal` and `-shm` files.
 // `Local State` is the last to go, as it tells there is something left to remove.
@@ -432,6 +469,7 @@ function adopt(base) {
   if (!list(base).some((entry) => entry.id === id)) {
     const others = Array.isArray(saved) ? saved.filter((entry) => entry?.id !== '') : [];
     const name =
+      // 主连接 is the name earlier versions gave the first connection, which is no name of the user's.
       first && typeof first.name === 'string' && first.name !== '主连接' ? first.name : '';
     writeShared(base, 'connections', [{ id, name: named(name) }, ...others]);
   }
@@ -449,6 +487,7 @@ module.exports = {
   directory,
   find,
   labelOf,
+  legacyProjects,
   list,
   listen,
   loginOf,
@@ -456,6 +495,7 @@ module.exports = {
   migrate,
   owner,
   pending,
+  projectsMoved,
   readShared,
   remove,
   rename,

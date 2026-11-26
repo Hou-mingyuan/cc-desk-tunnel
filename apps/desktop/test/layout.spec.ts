@@ -61,7 +61,6 @@ test('pages, side column, menus, pins, export, settings and the notice list', as
   await expect(page.locator('.list-heading').first()).toHaveText('置顶');
   await page.getByRole('button', { name: `项目操作 · ${project}`, exact: true }).click();
   await shot(page, '02-项目菜单');
-  await expect(page.getByRole('menuitem', { name: '移除项目' })).toHaveCount(0);
   await page.getByRole('menuitem', { name: '修改显示名称', exact: true }).click();
   await page.getByRole('dialog').getByLabel('显示名称').fill('我的项目');
   await page.getByRole('dialog').getByRole('button', { name: '保存', exact: true }).click();
@@ -71,6 +70,19 @@ test('pages, side column, menus, pins, export, settings and the notice list', as
   await group.click({ button: 'right' });
   await page.getByRole('menuitem', { name: '置顶', exact: true }).click();
   await expect(group.locator('.pin-mark')).toBeVisible();
+  // Removed, the project leaves the list and its session is a plain one where it is; the folder added again, the
+  // session is back in it, under the folder's own name.
+  await group.click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '移除项目', exact: true }).click();
+  await expect(page.locator('.project-group > h2').filter({ hasText: '我的项目' })).toHaveCount(0);
+  await expect(page.locator('.composer-context')).toContainText('普通会话');
+  await page.getByRole('button', { name: '添加项目', exact: true }).click();
+  await page.getByLabel('本机项目目录').fill(project);
+  await page.getByRole('button', { name: '添加', exact: true }).click();
+  await expect(
+    page.locator(`.project-group > h2[title="${project.replaceAll('\\', '\\\\')}"]`),
+  ).toHaveCount(1);
+  await expect(page.locator('.composer-context')).toContainText('中文项目');
 
   // The whole session leaves as one Markdown file.
   await row.hover();
@@ -119,7 +131,6 @@ test('pages, side column, menus, pins, export, settings and the notice list', as
     ['账号与额度', '账号与额度'],
     ['CLI 设置', 'CLI 设置'],
     ['全局说明', '全局说明'],
-    ['帮助', '帮助'],
     ['关于与更新', '关于与更新'],
   ]) {
     await sections.getByRole('button', { name, exact: true }).click();
@@ -372,9 +383,11 @@ test('a run that goes on only for background tasks looks finished, lists them an
         reply({
           type: 'ready',
           protocolVersion: PROTOCOL_VERSION,
+          serverDeviceId: '00000000-0000-4000-8000-000000000001',
           version: '0.0.1',
           connectionId,
           adapter: 'claude-code',
+          projects: [],
           sessions: [session],
         });
         return;
@@ -472,9 +485,11 @@ test('approval modes are described where they are chosen, and models sit behind 
         reply({
           type: 'ready',
           protocolVersion: PROTOCOL_VERSION,
+          serverDeviceId: '00000000-0000-4000-8000-000000000001',
           version: '0.0.1',
           connectionId: randomUUID(),
           adapter: 'claude-code',
+          projects: [],
           sessions: [session, background],
         });
         return;
@@ -621,7 +636,7 @@ test('Electron: frameless window, the project branch, files by path and window s
   const profile = resolve('.local/ui-test/profile-layout');
   rmSync(profile, { recursive: true, force: true });
   const application = await _electron.launch({
-    args: [resolve('apps/desktop'), '--smoke-test', ...connectionArgs(profile)],
+    args: [resolve('apps/desktop'), '--smoke-test', '--lang=zh-CN', ...connectionArgs(profile)],
     env,
   });
   try {
